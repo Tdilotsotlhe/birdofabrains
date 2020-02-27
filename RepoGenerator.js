@@ -35,7 +35,7 @@ listOfDto2.forEach(element => {
 	var path = 'C:\\sandbox\\xlr8\\Application\\Transaction\\Dto\\' + element + ".cs";
 
 	try {
-		if (fs.existsSync(path)) {
+		if (!fs.existsSync(path)) {
 			var exec = require('child_process').exec;
 			exec('node DtoGenerator.js '+ element, function callback(error, stdout, stderr) {
 				console.log(stdout);

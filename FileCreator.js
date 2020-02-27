@@ -15,7 +15,7 @@ function WriteData(theString, filename, directory) {
     } 
     fs.writeFile(directory +"\\"+ filename + '.cs', theString, (err) => {
         if (err) throw err;
-        console.log('record added');
+        console.log('record added: '+filename);
     })
 }
 

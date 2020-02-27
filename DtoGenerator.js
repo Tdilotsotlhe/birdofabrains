@@ -25,7 +25,7 @@ if (found) {
         if (!fs.existsSync("Dto\\" +element+".cs")) {
         exec('node DtoGenerator.js ' + element, function callback(error, stdout, stderr) {
             // result
-            console.log(stdout);
+            // console.log(stdout);
         });
     }
     });
