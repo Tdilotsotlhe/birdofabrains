@@ -1,7 +1,9 @@
 var fs = require('fs');
 var fc = require('./FileCreator');
+// var exec = require('child_process').spawn;
+var DTG = require("./DtoGenerator");
 
-var dir = "./Transacton"
+var dir = "./Transaction"
 var listOfDto = [];
 //read file
 var text = fs.readFileSync("./fnList.txt").toString('utf-8');
@@ -30,22 +32,31 @@ uniArr.forEach(element => {
 });
 const listOfDto2 = [...(new Set(listOfDto))];
 ///check if DTO exists locally in new project
+// const exec = require('child_process').exec;
 listOfDto2.forEach(element => {
 
+	console.log(" found DTO:"+element);
 	var path = 'C:\\sandbox\\xlr8\\Application\\Transaction\\Dto\\' + element + ".cs";
 
 	try {
-		if (!fs.existsSync(path)) {
-			var exec = require('child_process').exec;
-			exec('node DtoGenerator.js '+ element, function callback(error, stdout, stderr) {
-				console.log(stdout);
-			});
+		if (!fs.existsSync('Transaction\\Dto\\' + element + ".cs")) {
+			console.log("DTO DOES NOT EXIST");
+			// var exec = require('child_process').exec;
+			// var cptest = require('child_process').spawn('node',  'DtoGenerator.js '+ element);
+			// cptest.on('exit', console.log.bind(console, 'exited'))
+			// exec('node DtoGenerator.js '+ element, function callback(error, stdout, stderr) {
+			// 	// console.log(stdout);
+			// 	exec.on('exit', console.log.bind(console, 'exited'))
+			// 	// exec.exit();
+			// });
+			DTG.DtoGen(element, dir);
+			
 		}
 	} catch (err) {
 		console.error(err)
 	}
 });
-
+// exec.kill();
 
 
 //generates object conforming to model
