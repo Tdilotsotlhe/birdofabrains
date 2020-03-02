@@ -3,6 +3,12 @@ var fc = require('./FileCreator');
 // var exec = require('child_process').spawn;
 var DTG = require("./DtoGenerator");
 
+function sleep(delay) {
+    var start = new Date().getTime();
+    while (new Date().getTime() < start + delay);
+}
+// sleep(10000)
+
 var dir = "./Transaction"
 var listOfDto = [];
 //read file
@@ -56,10 +62,7 @@ listOfDto2.forEach(element => {
 		console.error(err)
 	}
 });
-// exec.kill();
 
-
-//generates object conforming to model
 function genModel(details) {
 	var fnName = details.fnName;
 	var paramString = details.paramString;
