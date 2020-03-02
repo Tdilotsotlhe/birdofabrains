@@ -1,1 +1,3206 @@
-IEnumerable<TransactionDto> GetTransactionsByClientImportFileID(int clientImportFileID);
+    public TransactionRepository()
+        {
+            _log = LogManager.GetLogger(typeof(TransactionRepository));
+            _unitOfWork = Locator.Get<IUnitOfWork<DBOEntities>>();
+
+            activeTransactionStatuses = new List<int>() { (int)TransactionStatusEnum.Pending,
+                                                          (int)TransactionStatusEnum.Submitted,
+                                                          (int)TransactionStatusEnum.Processed,
+                                                          (int)TransactionStatusEnum.AwaitingAuthorisation,
+                                                          (int)TransactionStatusEnum.AwaitingFinancialRelease,
+                                                          (int)TransactionStatusEnum.AwaitingRecallAuthorisation,
+                                                          (int)TransactionStatusEnum.AwaitingBulkRecallAuthorisation};
+        }
+
+        public List<TransactionDto> GetTransactionByFileWithAuth(int clientImportFileID)
+        {
+            var db = Locator.DBContext;
+
+            var transactions = (from t in db.Transactions
+                                where t.ClientImportFileID == clientImportFileID &&
+                                t.TransactionStatusID != (int)TransactionStatusEnum.InternalRecall
+                                select new TransactionDto
+                                {
+                                    TransactionID = t.TransactionID,
+                                    BucketID = t.BucketID,
+                                    EntityID = t.EntityID,
+                                    TransactionStatusID = t.TransactionStatusID,
+                                    BankAccountTypeID = t.BankAccountTypeID,
+                                    ServiceChannelID = t.ServiceChannelID,
+                                    ServiceTypeID = t.ServiceTypeID,
+                                    TransactionTypeID = t.TransactionTypeID,
+                                    ClientImportFileID = t.ClientImportFileID,
+                                    ActionDate = t.ActionDate,
+                                    CreationDate = t.CreationDate,
+                                    TransactionSubTypeID = t.TransactionSubTypeID,
+                                    AccountHolder = t.AccountHolder,
+                                    AccountNumber = t.AccountNumber,
+                                    Amount = t.Amount,
+                                    BusinessEventTaskID = t.BusinessEventTaskID,
+                                    MustGotoLevel2 = t.TransactionExceptions.Any(te => te.ExceptionMessage.MustGotoLevel2)
+                                }).ToList();
+
+            return transactions;
+        }
+
+        public List<TransactionDto> GetTransactionsWithAuth(int transactionID)
+        {
+            var db = Locator.DBContext;
+
+            var transactions = (from t in db.Transactions
+                                where t.TransactionID == transactionID
+                                select t);
+
+            var journalContras = (from t in transactions
+                                  join tc in db.Transactions on t.JournalID equals tc.JournalID
+                                  where t.JournalID.HasValue && tc.TransactionID != t.TransactionID
+                                  select tc);
+
+            return transactions
+                  .Concat(journalContras)
+                  .Select(t => new TransactionDto
+                  {
+                      TransactionID = t.TransactionID,
+                      BucketID = t.BucketID,
+                      EntityID = t.EntityID,
+                      TransactionStatusID = t.TransactionStatusID,
+                      BankAccountTypeID = t.BankAccountTypeID,
+                      ServiceChannelID = t.ServiceChannelID,
+                      ServiceTypeID = t.ServiceTypeID,
+                      TransactionTypeID = t.TransactionTypeID,
+                      ClientImportFileID = t.ClientImportFileID,
+                      JournalID = t.JournalID,
+                      ActionDate = t.ActionDate,
+                      CreationDate = t.CreationDate,
+                      TransactionSubTypeID = t.TransactionSubTypeID,
+                      AccountHolder = t.AccountHolder,
+                      AccountNumber = t.AccountNumber,
+                      Amount = t.Amount,
+                      BusinessEventTaskID = t.BusinessEventTaskID,
+                      MustGotoLevel2 = t.TransactionExceptions.Any(te => te.ExceptionMessage.MustGotoLevel2)
+                  }).ToList();
+        }
+
+        [Cache(CacheType = CacheType.Disk)]
+        public IEnumerable<TransactionDto> GetTransactionByClientImportFile(int clientImportFileID)
+        {
+            _unitOfWork = Locator.Get<IUnitOfWork<DBOEntities>>();
+
+            return _unitOfWork.Query<TransactionDto>(sql: "SELECT * FROM [dbo].[Transaction] WITH (NOLOCK) WHERE [ClientImportFileID] = @Id", param: new { Id = clientImportFileID }, commandType: CommandType.Text);
+        }
+
+        [Cache(CacheType = CacheType.Disk)]
+        public IEnumerable<Transaction> GetTransactionByBucket(int bucketID)
+        {
+            _unitOfWork = Locator.Get<IUnitOfWork<DBOEntities>>();
+
+            return _unitOfWork.Query<Transaction>(sql: "SELECT * FROM [dbo].[Transaction] WITH (NOLOCK) WHERE [BucketID] = @Id", param: new { Id = bucketID }, commandType: CommandType.Text);
+        }
+
+        public override TransactionDto[] SaveEntities(TransactionDto[] dto, bool bypass = false, bool mustSkipWorkflow = false)
+        {
+            var list = new List<TransactionDto>();
+
+            foreach (var item in dto)
+                list.Add(SaveEntity(item, bypass));
+
+            return list.ToArray();
+        }
+        public IEnumerable<TransactionDto> GetTransactonsToLinkExceptions(int clientImportFileID)
+        {
+            _unitOfWork = Locator.Get<IUnitOfWork<DBOEntities>>();
+            _log.DebugFormat("Running [dbo].[GetTransactonsToLinkExceptions] Stored Procedure. ClientImportFileID: {0}", clientImportFileID);
+            return _unitOfWork.Query<TransactionDto>(StoredProcedureNames.GetTransactonsToLinkExceptions, param: new { ClientImportFileID = clientImportFileID }, commandType: CommandType.StoredProcedure);
+        }
+
+        public async Task<IEnumerable<TransactionDto>> GetTransactonsToLinkExceptionsAsync(int clientImportFileID)
+        {
+            _unitOfWork = Locator.Get<IUnitOfWork<DBOEntities>>();
+            return await _unitOfWork.QueryAsync<TransactionDto>(StoredProcedureNames.GetTransactonsToLinkExceptions, param: new { ClientImportFileID = clientImportFileID }, commandType: CommandType.StoredProcedure);
+        }
+
+        public IEnumerable<TransactionExceptionDto> GetTransactionExceptions(int transactionID, int exceptionMessageID)
+        {
+            _unitOfWork = Locator.Get<IUnitOfWork<DBOEntities>>();
+            return _unitOfWork.Query<TransactionExceptionDto>(StoredProcedureNames.GetTransactionExceptions, param: new { TransactionID = transactionID, ExceptionMessageID = exceptionMessageID }, commandType: CommandType.StoredProcedure);
+        }
+
+        public async Task<IEnumerable<TransactionExceptionDto>> GetTransactionExceptionsAsync(int transactionID, int exceptionMessageID)
+        {
+            _unitOfWork = Locator.Get<IUnitOfWork<DBOEntities>>();
+            return await _unitOfWork.QueryAsync<TransactionExceptionDto>(StoredProcedureNames.GetTransactionExceptions, param: new { TransactionID = transactionID, ExceptionMessageID = exceptionMessageID }, commandType: CommandType.StoredProcedure);
+        }
+
+        private void OnTransactionRowsCopied(object sender, SqlRowsCopiedObjectEventArgs e)
+        {
+            var bulkCopy = sender as SqlBulkCopy;
+            if (bulkCopy != null)
+                _log.DebugFormat("Transactions saved {0} out of {1}", e.RowsCopied, bulkCopy.BatchSize);
+        }
+
+        public TransactionDto UpdateTransaction(TransactionDto transactions)
+        {
+            var db = Locator.DBContext;
+
+            List<int> excludedStatuses = new List<int> { (int)TransactionStatusEnum.AwaitingAuthorisation,
+                                                         (int)TransactionStatusEnum.InternalRejections };
+
+            var transactionImportList = (from t in transactions.Transactions
+                                         where !excludedStatuses.Contains(t.TransactionStatusID)
+                                         select new TransactionImportDto
+                                         {
+                                             TransactionID = t.TransactionID,
+                                             TransactionStatusID = t.TransactionStatusID
+                                         }).ToList();
+            try
+            {
+                var _unitOfWork = Locator.Get<IUnitOfWork<DBOEntities>>();
+                //Update local transactions
+                var transactionRepository = Locator.Get<ITransactionRepository<Transaction, TransactionDto>>();
+                if (transactionImportList.Any())
+                    _unitOfWork.UpdateBulkEntities(tableName: "[dbo].[TransactionImport]", data: transactionImportList, keyName: "TransactionID", columnNames: new string[] { "TransactionStatusID" });
+            }
+            catch (Exception ex)
+            {
+                throw ex;
+            }
+
+            return transactions;
+        }
+
+        public TransactionDto SaveToImport(TransactionDto transactionDto)
+        {
+            _log.Debug("Start of SaveToImport()");
+
+            var db = Locator.DBContext;
+            var sw = Stopwatch.StartNew();
+            var userID = transactionDto.UserId;
+            var currentDate = DateTime.Now;
+
+            _log.Debug("Bulk Copy time has started");
+
+            SqlConnection destinationConnection = _unitOfWork.Context.CurrentConnection as SqlConnection;
+            if (destinationConnection.State == ConnectionState.Closed)
+            {
+                _log.Debug("Connection is closed reopenning........");
+                destinationConnection.Open();
+            }
+
+            _log.Debug("Saving Transactions in Bulk");
+
+            _unitOfWork.SaveBulkEntities<TransactionDto>(TableNames.Transaction, transactionDto.Transactions, transactionDto.FileImportID, OnTransactionRowsCopied, "TransactionID", "EntityID", "TransactionTypeID", "TransactionSubTypeID"
+                                                        , "TransactionStatusID", "BucketID", "BankAccountTypeID", "ServiceTypeID", "OriginalServiceTypeID", "ACBBatchID", "BankAccountTransactionID", "ACBReasonCodeID", "ACBErrorCodeID"
+                                                        , "NAEDOTrackingDaysID", "ServiceChannelID", "CreationDate", "ActionDate", "AccountHolder", "AccountNumber", "BranchNumber", "TransactionReference", "UniqueIdentifier", "Amount"
+                                                        , "InternalRejectionReasonID", "Comment", "ClientImportFileID", "ForcedReferencing", "ChargeClientForRecall", "ExportFileID", "ClientExportFileID", "AuthorizationLevel"
+                                                        , "ParentTransactionID", "IsExternalSingleRecall", "IsExternalBatchRecall", "IsPaymentReversal", "ParentTransactionTypeID", "UserId", "InstructionFile", "InstructionFileType"
+                                                        , "InstructionFileWebType", "AggregateProcessedRatio", "AggregateExpectedRatio", "JournalID", "ItemProcessedRatio", "ItemExpectedRatio", "BankTransactionReference", "ReverseDate"
+                                                        , "AuthorisationLevelID", "ImportExceptionIdentifier", "IsNominatedParty", "BusinessEventTaskID");
+
+            sw.Stop();
+            _log.Debug("Bulk Copy Total Time to save: " + sw.ElapsedMilliseconds);
+            _log.Debug("Done saving Transactions in Bulk");
+
+            sw = Stopwatch.StartNew();
+            var savedTransactions = GetTransactonsToLinkExceptions(transactionDto.ClientImportFileID.Value);
+            sw.Stop();
+            _log.Debug("Total time for getting linked exception transactions: " + sw.ElapsedMilliseconds);
+
+            sw = Stopwatch.StartNew();
+            var transactions = transactionDto.Transactions;
+            var transactionExceptions = new List<TransactionExceptionSaveDto>();
+            foreach (var transaction in transactions)
+            {
+                if (transaction.ImportExceptionIdentifier.HasValue)
+                {
+                    var savedTransaction = savedTransactions.SingleOrDefault(x => x.ImportExceptionIdentifier == transaction.ImportExceptionIdentifier);
+
+                    if (savedTransaction == null)
+                        continue;
+
+                    if (transaction.Exceptions != null)
+                    {
+                        foreach (var exception in transaction.Exceptions)
+                        {
+                            transactionExceptions.Add(new TransactionExceptionSaveDto
+                            {
+                                TransactionID = savedTransaction.TransactionID,
+                                ExceptionMessageID = exception.ExceptionMessageID
+                            });
+                        }
+                    }
+                }
+            }
+            sw.Stop();
+            _log.Debug("Total time for setting Transaction Exceptions list: " + sw.ElapsedMilliseconds);
+
+            sw = Stopwatch.StartNew();
+            _log.Debug("Saving TransactionExceptions");
+            _unitOfWork.SaveBulkEntities<TransactionExceptionSaveDto>(TableNames.TransactionException, transactionExceptions, null, null, "TransactionExceptionID", "TransactionID", "ExceptionMessageID");
+            sw.Stop();
+            _log.Debug("Done saving TransactionExceptions");
+            _log.Debug("Exceptions save: " + sw.ElapsedMilliseconds);
+
+            sw = Stopwatch.StartNew();
+            _log.Debug("Calculating Payment Ratios if Payment");
+            var ratios = CalculatePaymentRatioImport(destinationConnection, userID, transactions);
+            sw.Stop();
+            _log.Debug("Done calculating Payment Ratios if Payment");
+            _log.Debug("Payment ratios time: " + sw.ElapsedMilliseconds);
+
+            sw = Stopwatch.StartNew();
+            _log.Debug("Saving Payment Ratios");
+            _unitOfWork.SaveBulkEntities<RatioCalculationDto>(TableNames.RatioCalculation, ratios, null, null, "RatioCalculationID", "BucketID", "TransactionTypeID", "TransactionSubTypeID", "TransactionStatusID", "Ratio", "UserId", "DateModified", "RatioTypeID", "AggregateRatio");
+            sw.Stop();
+            _log.Debug("Done saving Payment Ratios");
+            _log.Debug("time to save payment ratio: " + sw.ElapsedMilliseconds);
+
+            sw = Stopwatch.StartNew();
+            _log.Debug("Saving Notes");
+            var notes = new List<NoteDto>();
+            foreach (var transactionItem in transactionDto.Transactions)
+            {
+                if (transactionItem.Notes != null)
+                {
+                    if (transactionItem.ImportExceptionIdentifier.HasValue)
+                    {
+                        var savedTransaction = savedTransactions.FirstOrDefault(x => x.ImportExceptionIdentifier == transactionItem.ImportExceptionIdentifier);
+                        foreach (var note in transactionItem.Notes)
+                        {
+                            if (note.IsNew)
+                            {
+                                var savedTransactionExceptions = GetTransactionExceptions(savedTransaction.TransactionID, note.ExceptionMessageID.GetValueOrDefault());
+                                if (savedTransactionExceptions.Count() > 0)
+                                {
+                                    notes.Add(new NoteDto
+                                    {
+                                        ClassTypeID = (int)ClassTypeEnum.Transaction,
+                                        ID = savedTransaction.TransactionID,
+                                        UserID = userID,
+                                        TransactionExceptionID = savedTransactionExceptions.FirstOrDefault().TransactionExceptionID,
+                                        ShortDescription = note.ShortDescription,
+                                        LongDescription = note.LongDescription,
+                                        EntityID = savedTransaction.EntityID,
+                                        AuthorisationLevelID = note.AuthorisationLevelID
+                                    });
+                                }
+                                else
+                                {
+                                    notes.Add(new NoteDto
+                                    {
+                                        ClassTypeID = (int)ClassTypeEnum.Transaction,
+                                        ID = savedTransaction.TransactionID,
+                                        UserID = userID,
+                                        TransactionExceptionID = null,
+                                        ShortDescription = note.ShortDescription,
+                                        LongDescription = note.LongDescription,
+                                        EntityID = savedTransaction.EntityID,
+                                        AuthorisationLevelID = note.AuthorisationLevelID
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            _unitOfWork.SaveBulkEntities<NoteDto>(TableNames.Note, notes, null, null, "NoteID", "ID", "ShortDescription", "LongDescription", "NoteAttachmentID", "IsRejectNote", "UserID", "EntityID", "TransactionExceptionID", "ClassTypeID", "AuthorisationLevelID");
+            _log.Debug("Done Saving Notes");
+            _log.Debug("time to save notes: " + sw.ElapsedMilliseconds);
+            _log.Debug("End of SaveToImport()");
+
+            return transactionDto;
+        }
+
+        private List<RatioCalculationDto> CalculatePaymentRatioImport(SqlConnection db, Guid userID, IEnumerable<TransactionDto> dtos)
+        {
+            int count = 0;
+            var ratioCalculationsList = new List<RatioCalculationDto>();
+            var payments = dtos.Where(x => x.TransactionTypeID == (int)TransactionTypeEnum.Commission || x.TransactionTypeID == (int)TransactionTypeEnum.Premium || x.TransactionTypeID == (int)TransactionTypeEnum.BrokerFees
+                                                               || x.TransactionTypeID == (int)TransactionTypeEnum.Refund || x.TransactionTypeID == (int)TransactionTypeEnum.Claims || x.TransactionTypeID == (int)TransactionTypeEnum.VAP
+                                                               || x.TransactionTypeID == (int)TransactionTypeEnum.Other || x.TransactionTypeID == (int)TransactionTypeEnum.VAT || x.TransactionTypeID == (int)TransactionTypeEnum.InternalAccountTransfer);
+
+            var buckets = payments.Select(x => x.BucketID).Distinct();
+            var allTransactions = new List<TransactionDto>();
+
+            _log.Debug("Payment Ratios: Getting Transactions for Ratios");
+            foreach (var bucket in buckets)
+            {
+                allTransactions.AddRange(db.Query<TransactionDto>(StoredProcedureNames.GetTransactionsForRatios, new { BucketID = bucket }, commandType: CommandType.StoredProcedure, transaction: _unitOfWork.Transaction));
+            }
+            _log.Debug("Payment Ratios: Done getting Transactions for Ratios");
+
+            foreach (var dto in payments)
+            {
+                count++;
+                _log.Debug("Payment Ratios: Calc #" + count + " of " + payments.Count());
+                var transactions = allTransactions.Where(x => x.BucketID == dto.BucketID);
+                //TODO: temp solution for now must find better solution later.                                            
+                var ratioCalculation = new RatioCalculationDto();
+
+                double transactionTypeSubTypeValue = 0;
+
+                if (dto.TransactionSubTypeID != null)
+                    transactionTypeSubTypeValue = GetTransactionSubTypeValue((int)dto.TransactionSubTypeID, transactions);
+                else
+                    transactionTypeSubTypeValue = GetTransactionTypeValue((int)dto.TransactionTypeID, transactions);
+
+                ratioCalculation.BucketID = dto.BucketID;
+                ratioCalculation.TransactionTypeID = dto.TransactionTypeID;
+                ratioCalculation.TransactionSubTypeID = dto.TransactionSubTypeID;
+                ratioCalculation.TransactionStatusID = dto.TransactionStatusID;
+                ratioCalculation.UserId = userID;
+                ratioCalculation.DateModified = System.DateTime.Now;
+                var totalFundsHandled = GetSumOfPaymentTypeOverPeriod(transactions, false);
+                ratioCalculation.Ratio = totalFundsHandled == 0 ? 0 : (dto.Amount / totalFundsHandled) * 100;
+                ratioCalculation.RatioTypeID = (int)RatioTypeEnum.PaymentCollectionRatio;
+                ratioCalculation.AggregateRatio = totalFundsHandled == 0 ? 0 : (transactionTypeSubTypeValue / totalFundsHandled) * 100;
+                ratioCalculationsList.Add(ratioCalculation);
+
+                var ratioCalculationJournals = (RatioCalculationDto)ratioCalculation.Clone();
+                ratioCalculationJournals.RatioCalculationID = 0;
+                totalFundsHandled = GetSumOfPaymentTypeOverPeriod(transactions, true);
+                ratioCalculationJournals.Ratio = totalFundsHandled == 0 ? 0 : (dto.Amount / totalFundsHandled) * 100;
+                ratioCalculationJournals.RatioTypeID = (int)RatioTypeEnum.PaymentCollectionRatioIncludingJournals;
+                ratioCalculationJournals.AggregateRatio = totalFundsHandled == 0 ? 0 : (transactionTypeSubTypeValue / totalFundsHandled) * 100;
+                ratioCalculationsList.Add(ratioCalculationJournals);
+            }
+
+            return ratioCalculationsList;
+        }
+
+        private double GetSumOfPaymentTypeOverPeriod(IEnumerable<TransactionDto> transactions, bool includeJournals)
+        {
+            return GetServiceValueEnumerable((int)ServiceEnum.Payments, transactions);
+        }
+
+        private double GetTotalFundsHandledOverPeriod(IEnumerable<TransactionDto> transactions, bool includeJournals, bool onlyProcessed) //must never include payments
+        {
+            if (onlyProcessed)
+                transactions = transactions.Where(t => t.TransactionStatusID == (int)TransactionStatusEnum.Processed);
+
+            var collections = GetServiceValueEnumerable((int)ServiceEnum.Collections, transactions);
+            var rejections = GetServiceValueEnumerable((int)ServiceEnum.CollectionRejections, transactions);
+
+            var deposits = GetTransactionTypeValue((int)TransactionTypeEnum.Deposit, transactions);
+            var depositReversal = GetTransactionTypeValue((int)TransactionTypeEnum.DepositReversal, transactions);
+
+            var internalTransferCredit = GetTransactionTypeValue((int)TransactionTypeEnum.InternalSubAccountTransferCredit, transactions);
+            var internalTransferDebit = GetTransactionTypeValue((int)TransactionTypeEnum.InternalSubAccountTransferDebit, transactions);
+            if (includeJournals)
+                return (collections - rejections + deposits - depositReversal + internalTransferCredit - internalTransferDebit);
+
+            return (collections - rejections + deposits - depositReversal);
+        }
+
+        //almost duplicate of method above
+        private double GetTotalFundsHandledOverPeriod(IQueryable<Transaction> transactions, bool includeJournals, bool onlyProcessed) //must never include payments
+        {
+            if (onlyProcessed)
+                transactions = transactions.Where(t => t.TransactionStatusID == (int)TransactionStatusEnum.Processed);
+
+            var collections = GetServiceValue((int)ServiceEnum.Collections, transactions);
+            var rejections = GetServiceValue((int)ServiceEnum.CollectionRejections, transactions);
+
+            var deposits = GetTransactionTypeValue((int)TransactionTypeEnum.Deposit, transactions);
+            var depositReversal = GetTransactionTypeValue((int)TransactionTypeEnum.DepositReversal, transactions);
+
+            var internalTransferCredit = GetTransactionTypeValue((int)TransactionTypeEnum.InternalSubAccountTransferCredit, transactions);
+            var internalTransferDebit = GetTransactionTypeValue((int)TransactionTypeEnum.InternalSubAccountTransferDebit, transactions);
+            if (includeJournals)
+                return (collections - rejections + deposits - depositReversal + internalTransferCredit - internalTransferDebit);
+
+            return (collections - rejections + deposits - depositReversal);
+        }
+
+        private double GetServiceValueEnumerable(int serviceID, IEnumerable<TransactionDto> processedTransactions)
+        {
+            var accountMovements = processedTransactions.Where(x => x.ServiceID.HasValue && x.ServiceID.Value == serviceID);
+            return (double)(accountMovements.Any() ? accountMovements.Sum(a => a.Amount) : 0);
+        }
+
+        public double GetTransactionTypeValue(int transactionTypeID, IEnumerable<TransactionDto> processedTransactions)
+        {
+            var accountMovements = processedTransactions.Where(
+            x => x.TransactionTypeID == transactionTypeID);
+            return (double)(accountMovements.Any() ? accountMovements.Sum(a => a.Amount) : 0);
+        }
+
+        public double GetTransactionSubTypeValue(int transactionSubTypeID, IEnumerable<TransactionDto> processedTransactions)
+        {
+            var accountMovements = processedTransactions.Where(
+            x => x.TransactionSubTypeID == transactionSubTypeID);
+            return (double)(accountMovements.Any() ? accountMovements.Sum(a => a.Amount) : 0);
+        }
+
+        public TransactionDto[] SaveToFtp(ImportPaymentFileItem importPaymentFileItem, int clientImportFileID, List<TransactionDto> transactions)
+        {
+            var results = base.SaveEntities(transactions.ToArray(), true);
+            //Save Exceptions
+            if (results != null)
+            {
+                if (results.Any())
+                {
+                    for (int i = 0; i < transactions.Count; i++)
+                    {
+                        var dto = transactions[i];
+                        if (dto.Exceptions != null)
+                        {
+                            foreach (var exc in dto.Exceptions)
+                            {
+                                if (exc.ExceptionMessageID > 0)
+                                {
+                                    exc.TransactionExceptionDto = TransactionExceptionRepo.Value.SaveEntity(new TransactionExceptionDto()
+                                    {
+                                        ExceptionMessageID = exc.ExceptionMessageID,
+                                        TransactionID = results[i].TransactionID
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (transactions.Count > 0)
+                Workflow.UpdateWorkflow(importPaymentFileItem.EntityID, clientImportFileID, BusinessEventEnum._TransactionCreated, null, ClassTypeEnum.ClientImportFile, new TransactionWorkflowDto() { Transactions = results.ToList() });
+
+            return results;
+        }
+
+        public Transaction GetByClassTypeID(int classTypeID, int id)
+        {
+            var db = Locator.DBContext;
+            db.Configuration.ProxyCreationEnabled = true;
+            Transaction transaction = null;
+            switch (classTypeID)
+            {
+                case (int)ClassTypeEnum.ClientImportFile:
+                    transaction = (from cif in db.ClientImportFiles.Where(z => z.ClientImportFileID == id)
+                                   join b in db.Buckets on cif.BucketID equals b.BucketID
+                                   join t in db.Transactions on b.BucketID equals t.BucketID
+                                   select t).FirstOrDefault();
+                    break;
+                case (int)ClassTypeEnum.Transaction:
+                    transaction = db.Transactions.Find(id);
+                    break;
+                default:
+                    break;
+            }
+
+            return transaction;
+        }
+
+        public bool IsNegativeExpectedBalance(TransactionDto dto)
+        {
+            var db = Locator.DBContext;
+            db.Configuration.ProxyCreationEnabled = true;
+            var isNegativeBalance = from b in db.Buckets
+                                    join sa in db.QuoteSubAccounts on b.QuoteSubAccountID equals sa.QuoteSubAccountID
+                                    join jrs in db.JournalRules on sa.JournalRuleID equals jrs.JournalRuleID into optSubRule
+                                    from jrs in optSubRule.DefaultIfEmpty()
+                                    join ig in db.QuoteInterestCalculationGroups on sa.QuoteInterestCalculationGroupID equals ig.QuoteInterestCalculationGroupID
+                                    join jrg in db.JournalRules on ig.JournalRuleID equals jrg.JournalRuleID into optGroupRule
+                                    from jrg in optGroupRule.DefaultIfEmpty()
+                                    where b.BucketID == dto.BucketID
+                                    select jrs != null ? jrs.IsNegativeBalance : (jrg != null ? jrg.IsNegativeBalance : false);
+
+            return isNegativeBalance.FirstOrDefault().GetValueOrDefault();
+        }
+
+        public TransactionDto SaveLinkedTransactions(TransactionDto dto)
+        {
+            var db = Locator.DBContext;
+            var isRejection = false;
+            db.Configuration.ProxyCreationEnabled = false;
+            //get the original bankaccounttransaction
+            var bankAccountTransaction = db.BankAccountTransactions.Find(dto.BankAccountTransactionID);
+
+            //get the transactions to link to the bankaccounttransaction
+            //or in the case of colleciton rejections their parent transactions
+            var linkClientTransactions = from t in db.Transactions
+                                         where dto.transactionIDs.Contains(t.TransactionID)
+                                         select t;
+
+            var clientTransactionList = new List<Transaction>();
+            TransactionDto[] savedLinkedTransactions;
+
+            int transactionTypeId = 0;
+            switch (bankAccountTransaction.BankAccountTransactionTypeID)
+            {
+                case (int)BankAccountTransactionTypeEnum.CollectionRejectionContra:
+                    transactionTypeId = (int)TransactionTypeEnum.CollectionRejection;
+                    isRejection = true;
+                    break;
+                case (int)BankAccountTransactionTypeEnum.PaymentRejectionContra:
+                    transactionTypeId = (int)TransactionTypeEnum.PaymentRejection;
+                    isRejection = true;
+                    break;
+                case (int)BankAccountTransactionTypeEnum.DepositReversal:
+                    transactionTypeId = (int)TransactionTypeEnum.DepositReversal;
+                    isRejection = true;
+                    break;
+                default:
+                    break;
+            }
+
+            //create a collection/payment rejection transaction
+            //for each client transaction linked 
+            //ONLY for collection & payment rejection bankaccount transaction
+            var newRejectionTransactionList = new List<Transaction>();
+            foreach (var linkClientTransaction in linkClientTransactions)
+            {
+                linkClientTransaction.TransactionStatusID = (int)TransactionStatusEnum.Processed;
+
+                if (isRejection)
+                {
+                    var newRejectionTransaction = ObjectMapper.Value.MapObject<Transaction>(linkClientTransaction);
+                    newRejectionTransaction.TransactionTypeID = transactionTypeId;
+                    newRejectionTransaction.ParentTransactionTypeID = linkClientTransaction.TransactionTypeID;
+                    newRejectionTransaction.ParentTransactionID = linkClientTransaction.TransactionID;
+                    newRejectionTransaction.BankAccountTransactionID = dto.BankAccountTransactionID;
+                    newRejectionTransaction.TransactionID = 0;
+                    newRejectionTransaction.CreationDate = DateTime.Today;
+                    newRejectionTransaction.ClientImportFileID = null;
+                    newRejectionTransaction.TransactionImportID = null;
+                    newRejectionTransaction.ClientExportFileID = null;
+                    newRejectionTransaction.LineId = null;
+                    if (transactionTypeId == (int)TransactionTypeEnum.CollectionRejection)
+                        newRejectionTransaction.ACBReasonCodeID = 29; //user defined SMI-18099                                        
+
+                    //SMI-17562
+                    newRejectionTransaction.ActionDate = bankAccountTransaction.StmtEffDate.HasValue ? bankAccountTransaction.StmtEffDate.Value : linkClientTransaction.ActionDate;
+                    newRejectionTransactionList.Add(newRejectionTransaction);
+                }
+                else
+                {
+                    //SMI-17445
+                    //dont overwrite the original bankaccounttransaction
+                    linkClientTransaction.BankAccountTransactionID = dto.BankAccountTransactionID;
+                }
+                clientTransactionList.Add(linkClientTransaction);
+            }
+
+            var savedCollectionRejectionTransactions = SaveList(newRejectionTransactionList.ToArray(), true);
+            savedLinkedTransactions = SaveList(clientTransactionList.ToArray(), true);
+
+            var transactionDtos = new List<TransactionDto>();
+            db.Configuration.ProxyCreationEnabled = true;
+
+            foreach (var linkedTransaction in savedLinkedTransactions)
+            {
+                linkedTransaction.EntityName = db.Entities.Find(linkedTransaction.EntityID).EntityName;
+                linkedTransaction.FormattedActionDate = linkedTransaction.ActionDate.ToString("yyyy-MM-dd");
+                var bucket = db.Buckets.Find(linkedTransaction.BucketID);
+                linkedTransaction.CollectionPeriod = string.Format("{0} To {1}", bucket.StartDate.ToShortDateString(), bucket.EndDate.ToShortDateString());
+                linkedTransaction.SubAccountName = bucket.QuoteSubAccount.ShortName;
+                linkedTransaction.InterestGroupName = bucket.QuoteSubAccount.QuoteInterestCalculationGroup.ShortName;
+                linkedTransaction.AgreementName = bucket.QuoteSubAccount.QuoteInterestCalculationGroup.Quote.Description;
+                linkedTransaction.Status = db.TransactionStatus.Find(linkedTransaction.TransactionStatusID).ShortDescription;
+                linkedTransaction.TransactionType = db.TransactionTypes.Find(linkedTransaction.TransactionTypeID).ShortDescription;
+                if (!isRejection)
+                    linkedTransaction.BankAccountTransactionID = bankAccountTransaction.BankAccountTransactionID;
+                transactionDtos.Add(linkedTransaction); //add or update
+            }
+
+            dto.Transactions = transactionDtos.Where(t => t.TransactionStatusID != (int)TransactionStatusEnum.Reversed).ToList();
+            if (dto.Transactions.Count() > 0)
+            {
+                var bankAccountTransactionAmount = bankAccountTransaction.StmtAmount / 100;
+                var totalClientTransactionAmount = dto.Transactions.Sum(s => s.Amount);
+
+                if (Math.Round(totalClientTransactionAmount, 2) == (double)Math.Round((double)bankAccountTransactionAmount, 2))
+                    bankAccountTransaction.BankAccountTransactionSubStatusID = (int)BankAccountTransactionSubStatusEnum.Allocated;
+                if (Math.Round(totalClientTransactionAmount, 2) < Math.Round((double)bankAccountTransactionAmount, 2))
+                    bankAccountTransaction.BankAccountTransactionSubStatusID = (int)BankAccountTransactionSubStatusEnum.PartiallyAllocated;
+            }
+
+            var bankAccountTransactionDto = BankAccountTransactionRepository.Value.SaveEntity(bankAccountTransaction);
+
+            dto.BankAccountTransaction = bankAccountTransactionDto;
+            dto.BankAccountTransaction.BankAccountTransactionSubStatus = db.BankAccountTransactionSubStatus.Find(bankAccountTransaction.BankAccountTransactionSubStatusID).ShortDescription;
+
+            return dto;
+        }
+
+        public TransactionDto SaveAllocatedTransactions(TransactionDto dto)
+        {
+            var dbContext = Locator.DBContext;
+            BankAccountTransaction bankAccountTransaction = dbContext.BankAccountTransactions.Find(dto.BankAccountTransactionID);
+            BankAccountTransactionDto bankAccountTransactionDto = null;
+            var accountNo = bankAccountTransaction.StmtAccNo.TrimStart('0');
+            var bankAccount = dbContext.BankAccounts.Find(bankAccountTransaction.BankAccountID);
+
+            var transactionList = new List<TransactionDto>();
+            foreach (var transaction in dto.Transactions)
+            {
+                transaction.AccountHolder = bankAccount != null ? bankAccount.AccountHolder : string.Empty;
+                transaction.AccountNumber = accountNo;
+                transaction.BranchNumber = bankAccountTransaction.StmtBranch.GetValueOrDefault().ToString().Length > 6 ? bankAccountTransaction.StmtBranch.GetValueOrDefault().ToString().TrimEnd('0') : bankAccountTransaction.StmtBranch.GetValueOrDefault().ToString();
+                transaction.BankAccountTypeID = 1;
+                transactionList.Add(transaction);
+            }
+
+            //link transactions         
+            SaveEntities(transactionList.ToArray(), true);
+            //delete partial transactions from temp table
+            foreach (var transaction in dto.Transactions)
+                EntityBankAccountTransactionRepository.Value.DeleteEntity(transaction.EntityBankAccountTransactionID);
+
+            //Update BankAccountTransaction to a substatus of allocated
+            var transactions = dbContext.Transactions.Where(x => x.BankAccountTransactionID == dto.BankAccountTransactionID).Where(x => x.TransactionStatusID != (int)TransactionStatusEnum.Reversed);
+            if (transactions.Count() > 0)
+            {
+                var bankAccountTransactionAmount = bankAccountTransaction.StmtAmount / 100;
+                var totalClientTransactionAmount = transactions.Sum(s => s.Amount);
+                //SMI-19071 Rounding to fix floating point issues
+                if (Math.Round(totalClientTransactionAmount, 2) == Math.Round((double)bankAccountTransactionAmount, 2))
+                    bankAccountTransaction.BankAccountTransactionSubStatusID = (int)BankAccountTransactionSubStatusEnum.Allocated;
+                if (Math.Round(totalClientTransactionAmount, 2) < Math.Round((double)bankAccountTransactionAmount, 2))
+                    bankAccountTransaction.BankAccountTransactionSubStatusID = (int)BankAccountTransactionSubStatusEnum.PartiallyAllocated;
+
+                if (transactions.Count() > 1)
+                {
+                    switch (bankAccountTransaction.BankAccountTransactionTypeID)
+                    {
+                        case (int)BankAccountTransactionTypeEnum.Deposit:
+                        case (int)BankAccountTransactionTypeEnum.DepositReversal:
+                            if (totalClientTransactionAmount == (double)bankAccountTransactionAmount)
+                                bankAccountTransaction.SplitDeposit = true;
+                            break;
+                        default:
+                            break;
+                    }
+                }
+
+                bankAccountTransactionDto = BankAccountTransactionRepository.Value.SaveEntity(bankAccountTransaction);
+                bankAccountTransactionDto.StmtAmount = bankAccountTransactionDto.StmtAmount / 100;
+                bankAccountTransactionDto.StmtAmount = bankAccountTransactionDto.StmtAmount / 100;
+            }
+
+            //get transactions to refresh list
+            dto.BankReconTransactions = EntityBankAccountTransactionRepository.Value.GetTransactions(dto.BankAccountTransactionID.Value);
+            dto.BankAccountTransaction = bankAccountTransactionDto;
+
+            return dto;
+        }
+
+        public IQueryable<TransactionDto> LoadTransactions(int transactionTypeID, int entityID, int quoteSubAccountID, int bucketID, double amount)
+        {
+            var db = Locator.DBContext;
+
+            var transactions = db.Transactions.Where(x => x.BankAccountTransactionID == null).AsQueryable();
+            if (transactionTypeID > 0)
+                transactions = transactions.Where(x => x.TransactionTypeID == transactionTypeID);
+            if (entityID > 0)
+                transactions = transactions.Where(x => x.EntityID == entityID);
+            if (amount > 0)
+                transactions = transactions.Where(x => x.Amount == amount);
+            if (bucketID > 0)
+                transactions = transactions.Where(x => x.BucketID == bucketID);
+            if (quoteSubAccountID > 0)
+            {
+                var listOfBuckets = db.Buckets.Where(x => x.QuoteSubAccountID == quoteSubAccountID).Select(x => x.BucketID);
+                transactions = transactions.Where(x => listOfBuckets.Contains(x.BucketID));
+            }
+
+            return transactions.ToDTOs().AsQueryable();
+        }
+
+        public TransactionSearchDto SearchTransactions(TransactionSearchCriteriaDto dto)
+        {
+            var header = HttpContext.Current.Request.Headers.GetValues("EntityID");
+            if (!dto.EntityID.HasValue)
+            {
+                if (header != null)
+                    dto.EntityID = int.Parse(header.First());
+                else
+                    dto.EntityID = 0;
+            }
+
+            var _unitOfWork = Locator.Get<IUnitOfWork<DBOEntities>>();
+            var db = _unitOfWork.Context.CurrentConnection;
+            var query = db.Query<TransactionSearchResultDto>(StoredProcedureNames.SearchTransactions, dto, _unitOfWork.Transaction, true, null, CommandType.StoredProcedure);
+            if (!query.Any() && dto.StartPage > 0)
+            {
+                --dto.StartPage;
+                query = db.Query<TransactionSearchResultDto>(StoredProcedureNames.SearchTransactions, dto, _unitOfWork.Transaction, true, null, CommandType.StoredProcedure);
+            }
+
+            if (query != null)
+            {
+                string[] dateArr = new string[3];
+                string dateFrom = "";
+                string dateTo = "";
+
+                for (int i = 0; i < query.Count(); i++)
+                {
+                    dateFrom = query.ElementAt(i).CollectionPeriodDescription.Substring(0, query.ElementAt(i).CollectionPeriodDescription.IndexOf(' ')).Replace("/", "-");
+                    dateTo = query.ElementAt(i).CollectionPeriodDescription.Substring(query.ElementAt(i).CollectionPeriodDescription.LastIndexOf(' ') + 1).Replace("/", "-");
+
+                    dateArr[0] = dateFrom.Substring(dateFrom.LastIndexOf('-') + 1);
+                    dateArr[1] = dateFrom.Substring(dateFrom.IndexOf('-') + 1, 2);
+                    dateArr[2] = dateFrom.Substring(0, dateFrom.IndexOf('-'));
+                    dateFrom = string.Join("-", dateArr);
+
+                    dateArr[0] = dateTo.Substring(dateTo.LastIndexOf('-') + 1);
+                    dateArr[1] = dateTo.Substring(dateTo.IndexOf('-') + 1, 2);
+                    dateArr[2] = dateTo.Substring(0, dateTo.IndexOf('-'));
+                    dateTo = string.Join("-", dateArr);
+
+                    query.ElementAt(i).CollectionPeriodDescription = dateFrom + " To " + dateTo;
+                }
+            }
+
+            var result = new TransactionSearchDto
+            {
+                StartPage = dto.StartPage,
+                Transactions = query
+            };
+
+            return result;
+        }
+
+        public IQueryable<TransactionDto> LoadTransactions(int bucketID)
+        {
+            var db = Locator.DBContext;
+            return db.Transactions.Where(x => x.BucketID == bucketID).ToDTOs().AsQueryable();
+        }
+
+        public IQueryable<TransactionDto> Search(Func<Transaction, bool> filter)
+        {
+            var db = Locator.DBContext;
+            return db.Transactions.Where(filter).ToDTOs().AsQueryable();
+        }
+
+        public override TransactionDto SaveEntity(TransactionDto dto, bool bypass = false, string screenKey = "")
+        {
+            var db = Locator.DBContext;
+
+            if (dto.BankAccountID == 0)
+            {
+                var bankAccount = (from b in db.Buckets
+                                   join qsa in db.QuoteSubAccounts on b.QuoteSubAccountID equals qsa.QuoteSubAccountID
+                                   join ig in db.QuoteInterestCalculationGroups on qsa.QuoteInterestCalculationGroupID equals ig.QuoteInterestCalculationGroupID
+                                   join ba in db.BankAccounts on ig.BankAccountID equals ba.BankAccountID
+                                   where b.BucketID == dto.BucketID
+                                   select ba).SingleOrDefault();
+
+                if (bankAccount != null)
+                    dto.BankAccountID = bankAccount.BankAccountID;
+            }
+
+            int startID = dto.TransactionID;
+            int endID = 0;
+            bool isNew = dto.TransactionID == 0;
+            var user = Thread.CurrentPrincipal.GetUser();
+
+            //SMI-18178 Transaction table's UserID should be populated with the UserId of the user who captured the payment. This value should not be reset. 
+            if (isNew)
+                dto.UserId = user.UserID;
+
+            var ignoreRules = HttpHeaderUtility.Value.GetHeaderValue<bool>("X-IgnoreRules");
+            if (!ignoreRules)
+            {
+                if (dto.Exceptions == null)
+                    dto.Exceptions = new List<ExceptionMessageDto>();
+            }
+
+            //--------------------| UPDATE TransactionStatusID |-------------------------------------//
+            if (isNew && dto.TransactionStatusID != (int)TransactionStatusEnum.InternalRejections && dto.TransactionStatusID != (int)TransactionStatusEnum.AwaitingFinancialRelease && dto.TransactionStatusID != (int)TransactionStatusEnum.Processed)
+                dto.TransactionStatusID = (int)TransactionStatusEnum.AwaitingAuthorisation;
+
+            if (isNew && dto.AuthorisationLevelID == null)
+            {
+                dto.AuthorisationLevelID = (int)AuthorisationLevelEnum.None;
+                Log.Debug("[**] setting new transaction on capture to AuthorisationLevelID 0 -None initially");
+            }
+            //Skip transaction auth for deposits
+            if (dto.TransactionTypeID == (int)TransactionTypeEnum.Deposit)
+                dto.MustSkipWorkflowOnSave = true;
+            //--------------------| UPDATE TransactionStatusID |-------------------------------------//
+
+            var currentScreenKey = HttpHeaderUtility.Value.GetHeaderValue<string>(HttpHeaderKeys.ScreenKey);
+            if ((currentScreenKey == ScreenItemEnum.TRANSACTIONADD || currentScreenKey == ScreenItemEnum.PAYNOMINATEDPAYMENTPARTIES) && IsPaymentTransaction(dto) && IsNNPPacsPaymentLimitExceeded(dto))
+                dto.ServiceChannelID = (int)ServiceChannelEnum.FNBOnline;
+
+            if (dto.ServiceChannelID == null || dto.ServiceChannelID == 0)
+                dto.ServiceChannelID = (int)ServiceChannelEnum.FNBPACS;
+            if (dto.TransactionSubTypeID == 0)
+                dto.TransactionSubTypeID = null;
+            if (!dto.ServiceTypeID.HasValue)
+                dto.ServiceTypeID = (int)ServiceTypeEnum.SameDay;
+
+            //Update File
+            if (!String.IsNullOrEmpty(dto.InstructionFileString))
+            {
+                byte[] bs = Convert.FromBase64String(dto.InstructionFileString);
+                dto.InstructionFile = bs;
+                dto.InstructionFileString = "";
+            }
+
+            var saveResult = base.SaveEntity(dto, bypass);
+            endID = dto.TransactionID;
+
+            //Check if any EXCEPTIONS are collected.
+            if (!ignoreRules && ExceptionUtility.Exceptions().Count > 0 && !bypass)
+            {
+                if (currentScreenKey == ScreenItemEnum.PAYNOMINATEDPAYMENTPARTIES)
+                {
+                    ExceptionUtility.ClearSession();
+                    return dto;
+                }
+                else
+                {
+                    ExceptionUtility.ClearSession();
+                    throw new RuleListException();
+                }
+            }
+
+            if (saveResult != null)
+            {
+                //Save Exceptions
+                if (dto.Exceptions != null)
+                {
+                    foreach (var exc in dto.Exceptions)
+                    {
+                        if (exc.ExceptionMessageID > 0)
+                        {
+                            exc.TransactionExceptionDto = TransactionExceptionRepo.Value.SaveEntity(new TransactionExceptionDto()
+                            {
+                                ExceptionMessageID = exc.ExceptionMessageID,
+                                TransactionID = saveResult.TransactionID,
+                                MustSkipWorkflowOnSave = true,
+                                IgnoreRules = true
+                            }, true);
+                        }
+                    }
+                }
+
+                //Save Notes
+                if (dto.Notes != null)
+                {
+                    foreach (var note in dto.Notes)
+                    {
+                        if (note.IsNew)
+                        {
+                            note.NoteID = 0;
+                            note.ID = saveResult.TransactionID;
+                            note.UserID = UserUtility.GetUserID();
+                            if (note.ExceptionMessageID != 0 && note.ExceptionMessageID != null)
+                                note.TransactionExceptionID = dto.Exceptions.FirstOrDefault(x => x.ExceptionMessageID == note.ExceptionMessageID).TransactionExceptionDto.TransactionExceptionID;
+                        }
+
+                        note.ClassTypeID = (int)ClassTypeEnum.Transaction;
+
+                        note.MustSkipWorkflowOnSave = true;
+                        note.IgnoreRules = true;
+                        NoteRepo.Value.SaveEntity(note, true);
+                    }
+                }
+
+                if ((startID == 0) && (endID != 0))
+                {
+                    CalculatePaymentRatio(dto);
+                }
+                //RS 2014-09-10  as the user can set the transactions to forced referincing or realtime
+                //we need to run this rule now and not (only) on initial import                     
+                else
+                {
+                    var ignoreRule = dto.IgnoreRules;
+                    dto.IgnoreRules = false;
+
+                    RuleEngine.ValidateRules<TransactionDto>(dto, "[TRANSACTION_AFTER_CAPTURE]");
+                    dto.IgnoreRules = ignoreRule; //I'm not sure of the impact so just put it back to how it was
+                }
+            }
+
+            _log.Info("Transaction Repository: Saved TransactionID: " + dto.TransactionID);
+
+            return saveResult;
+        }
+
+        private bool IsNNPPacsPaymentLimitExceeded(TransactionDto dto)
+        {
+            double creditTransactionLimit = 0d, globalTransactionLimit = 0d;
+
+            using (var db = Locator.DBContext)
+            {
+                var creditTransactionLimitQuery = from qicg in db.QuoteInterestCalculationGroups
+                                                  join ba in db.BankAccounts on qicg.BankAccountID equals ba.BankAccountID
+                                                  where qicg.QuoteInterestCalculationGroupID == dto.QuoteInterestCalculationGroupID
+                                                  select ba;
+
+                var globalTransactionLimitQuery = from gtl in db.GlobalTransactionLimits
+                                                  where gtl.GlobalTransactionLimitTypeID == 4
+                                                  select gtl;
+
+                var bacc = creditTransactionLimitQuery.FirstOrDefault();
+                var gtlim = globalTransactionLimitQuery.FirstOrDefault();
+
+                creditTransactionLimit = bacc != null ? bacc.CreditTransactionLimit ?? 0d : 0d;
+                globalTransactionLimit = gtlim != null ? gtlim.Value : 0d;
+            }
+
+            return dto.Amount > creditTransactionLimit && dto.Amount > globalTransactionLimit;
+        }
+
+        private bool IsPaymentTransaction(TransactionDto dto)
+        {
+            var paymentTypes = TransactionTypeRepository.Value.GetEntities(x => x.ServiceID == (int)(ServiceEnum.Payments)).AsQueryable();
+            return paymentTypes.Any(pt => pt.TransactionTypeID == dto.TransactionTypeID);
+        }
+
+        private void CalculatePaymentRatio(TransactionDto dto)
+        {
+            using (var dataContext = Locator.DBContext)
+            {
+                if (dataContext.Transactions.Where(t => t.TransactionID == dto.TransactionID).Select(t => t.TransactionType.ServiceID.HasValue ? t.TransactionType.ServiceID.Value : 0).First() != (int)ServiceEnum.Payments)
+                    return;
+
+                dataContext.Configuration.ProxyCreationEnabled = true;
+                var _unitOfWork = Locator.Get<IUnitOfWork<DBOEntities>>();
+                var db = _unitOfWork.Context.CurrentConnection;
+
+                var transactions = db.Query<TransactionDto>(StoredProcedureNames.GetTransactionsForRatios, new { BucketID = dto.BucketID }, _unitOfWork.Transaction, commandType: CommandType.StoredProcedure);
+
+                //TODO: temp solution for now must find better solution later.                                            
+                var ratioCalculation = new RatioCalculationDto();
+
+                double transactionTypeSubTypeValue = 0;
+
+                if (dto.TransactionSubTypeID != null)
+                    transactionTypeSubTypeValue = GetTransactionSubTypeValue((int)dto.TransactionSubTypeID, transactions);
+                else
+                    transactionTypeSubTypeValue = GetTransactionTypeValue((int)dto.TransactionTypeID, transactions);
+
+                var userID = UserUtility.GetUserID();
+                ratioCalculation.BucketID = dto.BucketID;
+                ratioCalculation.TransactionTypeID = dto.TransactionTypeID;
+                ratioCalculation.TransactionSubTypeID = dto.TransactionSubTypeID;
+                ratioCalculation.TransactionStatusID = dto.TransactionStatusID;
+                ratioCalculation.UserId = userID;
+                ratioCalculation.DateModified = System.DateTime.Now;
+                var totalFundsHandled = GetTotalFundsHandledOverPeriod(transactions, false, false);
+                ratioCalculation.Ratio = totalFundsHandled == 0 ? 0 : (dto.Amount / totalFundsHandled) * 100;
+                ratioCalculation.RatioTypeID = (int)RatioTypeEnum.PaymentCollectionRatio;
+                ratioCalculation.AggregateRatio = totalFundsHandled == 0 ? 0 : (transactionTypeSubTypeValue / totalFundsHandled) * 100;
+
+                RatioCalculationRepo.Value.SaveEntity(ratioCalculation, true);
+
+                var ratioCalculationJournals = (RatioCalculationDto)ratioCalculation.Clone();
+                ratioCalculationJournals.RatioCalculationID = 0;
+                totalFundsHandled = GetTotalFundsHandledOverPeriod(transactions, true, false);
+                ratioCalculationJournals.Ratio = totalFundsHandled == 0 ? 0 : (dto.Amount / totalFundsHandled) * 100;
+                ratioCalculationJournals.RatioTypeID = (int)RatioTypeEnum.PaymentCollectionRatioIncludingJournals;
+                ratioCalculationJournals.AggregateRatio = totalFundsHandled == 0 ? 0 : (transactionTypeSubTypeValue / totalFundsHandled) * 100;
+
+                RatioCalculationRepo.Value.SaveEntity(ratioCalculation, true);
+            }
+        }
+
+        private double GetServiceValue(int serviceID, IQueryable<Transaction> processedTransactions)
+        {
+            var accountMovements = processedTransactions.Where(x => x.TransactionType.ServiceID.HasValue && x.TransactionType.ServiceID.Value == serviceID);
+            return (double)(accountMovements.Any() ? accountMovements.Sum(a => a.Amount) : 0);
+        }
+
+        //Get value and volume for a specific calculation period
+        public double GetTransactionTypeValue(int transactionTypeID, IEnumerable<Transaction> processedTransactions)
+        {
+            var accountMovements = processedTransactions.Where(x => x.TransactionTypeID == transactionTypeID);
+            return (double)(accountMovements.Any() ? accountMovements.Sum(a => a.Amount) : 0);
+        }
+
+        public virtual IEnumerable<TransactionDto> GetTransactionsByClientImportFileID(int clientImportFileID)
+        {
+            var db = _unitOfWork.Context.CurrentConnection as SqlConnection;
+            var query = db.Query<TransactionDto>(StoredProcedureNames.GetRecallTransactionsByClientImportFileID, param: new { ClientImportFileID = clientImportFileID }, transaction: _unitOfWork.Transaction, commandType: CommandType.StoredProcedure);
+            return query;
+        }
+
+        public IEnumerable<TransactionDto> GetManualTransactions(int bucketID)
+        {
+            var transactions = unitOfWork.Query<TransactionDto>(StoredProcedureNames.GetTransactionsToRecall, param: new { BucketID = bucketID }, commandType: CommandType.StoredProcedure).ToList();
+
+            return transactions;
+        }
+
+        public IQueryable<TransactionDto> GetByBankAccountTransactionID(int bankAccountTransactionID)
+        {
+            return base.GetEntities(e => e.BankAccountTransactionID == bankAccountTransactionID).AsQueryable();
+        }
+
+        public string LoadTransactionsForBusinessEvent2(int businessEventTaskID, ClassTypeEnum classType = ClassTypeEnum.ClientImportFile)
+        {
+            var db = Locator.DBContext;
+            int authorisationLevel = 0;
+            var bet = db.BusinessEventTasks.Where(x => x.BusinessEventTaskID == businessEventTaskID).FromCache().FirstOrDefault();
+
+            if (bet == null)
+                throw new Exception("No business event task for transaction auth file");
+
+            authorisationLevel = (int)TransactionAuthLevelUtility.GetAuthLevel((BusinessEventEnum)bet.BusinessEventID, 0);
+
+            var json = SqlJsonReader.Value.XmlToJSON(StoredProcedureNames.GetTransactionsForBusinessEvent, CommandType.StoredProcedure, new { ClassTypeID = bet.ClassTypeID, AuthorisationLevel = authorisationLevel, ID = bet.ID, BusinessEventTaskID = bet.BusinessEventTaskID });
+            return json;
+        }
+
+        public List<TransactionDto> LoadTransactionsForBusinessEvent(int businessEventTaskID, ClassTypeEnum classType = ClassTypeEnum.ClientImportFile)
+        {
+            var _unitOfWork = Locator.Get<IUnitOfWork<DBOEntities>>();
+            var db = Locator.DBContext;
+            int authorisationLevel = 0;
+            var bet = db.BusinessEventTasks.Where(x => x.BusinessEventTaskID == businessEventTaskID).FromCache().FirstOrDefault();
+
+            if (bet == null)
+                throw new Exception("No business event task for transaction auth file");
+
+            var multipleResults = _unitOfWork.QueryMultiple(StoredProcedureNames.GetTransactionsForBusinessEvent, param: new { ClassTypeID = bet.ClassTypeID, AuthorisationLevel = authorisationLevel, ID = bet.ID, BusinessEventTaskID = bet.BusinessEventTaskID }, commandType: CommandType.StoredProcedure);
+            var transactions = multipleResults.Read<TransactionDto>(false).ToList();
+            var transactionExceptions = multipleResults.Read<TransactionExceptionDto>(false).ToList();
+            var notes = multipleResults.Read<NoteDto>(false).ToList();
+            var exceptionMessages = multipleResults.Read<ExceptionMessageDto>(false).ToList();
+
+            foreach (var transaction in transactions)
+            {
+                var filteredTransactionExceptions = transactionExceptions.Where(x => x.TransactionID == transaction.TransactionID);
+                foreach (var transactionException in filteredTransactionExceptions)
+                {
+                    transaction.Exceptions.AddRange(exceptionMessages.Where(x => x.ExceptionMessageID == transactionException.ExceptionMessageID && x.TransactionExceptionID == transactionException.TransactionExceptionID));
+                    transaction.Notes.AddRange(notes.Where(x => x.ID == transaction.TransactionID && x.TransactionExceptionID == transactionException.TransactionExceptionID));
+                }
+                transaction.TransactionExceptions.AddRange(filteredTransactionExceptions);
+            }
+
+            return transactions;
+        }
+
+        public async Task<NotAuthorizedDto> GetLoadNotAuthorizedTransactionsForJournals()
+        {
+            var db = Locator.DBContext;
+
+            NotAuthorizedDto returnVal = new NotAuthorizedDto();
+            UserUserDto currentUser = Thread.CurrentPrincipal.GetUser();
+            var entityId = HttpHeaderUtility.Value.GetHeaderValue<int>(HttpHeaderKeys.EntityID);
+
+            returnVal.Tasks = await (from bet in db.BusinessEventTasks
+                                     join be in db.BusinessEvents on bet.BusinessEventID equals be.BusinessEventID
+                                     join betu in db.BusinessEventTaskUsers on bet.BusinessEventTaskID equals betu.BusinessEventTaskID
+                                     where !bet.EndDate.HasValue
+                                        && betu.UserID == currentUser.UserID
+                                        && bet.EntityID == entityId
+                                        && (
+                                            be.BusinessEventID == (int)BusinessEventEnum._ExternalAuthorisationLevelOne ||
+                                            be.BusinessEventID == (int)BusinessEventEnum._ExternalAuthorisationLevelTwo ||
+                                            be.BusinessEventID == (int)BusinessEventEnum._ExternalAuthorisationLevelThree ||
+                                            be.BusinessEventID == (int)BusinessEventEnum._InternalAuthorisationLevelOne ||
+                                            be.BusinessEventID == (int)BusinessEventEnum._InternalAuthorisationLevelTwo ||
+                                            be.BusinessEventID == (int)BusinessEventEnum._InternalAuthorisationLevelThree ||
+                                            be.BusinessEventID == (int)BusinessEventEnum._InternalAuthorisationQualityControl
+                                           )
+                                        && (bet.ClassTypeID == (int)ClassTypeEnum.Journal)
+                                     select new BusinessEventTaskDto
+                                     {
+                                         EntityID = bet.EntityID,
+                                         TaskMessage = bet.TaskMessage,
+                                         BusinessEventID = bet.BusinessEventID,
+                                         BusinessEventTaskID = bet.BusinessEventTaskID,
+                                         ID = bet.ID,
+                                         ClassTypeID = bet.ClassTypeID,
+                                         EndDate = bet.EndDate,
+                                     }).ToListAsync();
+
+            foreach (var task in returnVal.Tasks)
+            {
+                var transactionStatus = db.Transactions.FirstOrDefault(x => x.JournalID == task.ID);
+                if (transactionStatus != null)
+                    task.TransactionStatusID = transactionStatus.TransactionStatusID;
+                else
+                    task.TransactionStatusID = (int)TransactionStatusEnum.Suspended; //This happens when there are no transactions relating to ClientImportFile this allows the screen to still load for other tasks.
+
+                var bet = db.BusinessEventTasks.FirstOrDefault(x => x.BusinessEventTaskID == task.BusinessEventTaskID);
+
+                task.Transactions = await (from t in db.Transactions
+                                           join tex in db.TransactionExceptions on t.TransactionID equals tex.TransactionID into texg
+                                           join b in db.Buckets on t.BucketID equals b.BucketID
+                                           join sa in db.QuoteSubAccounts on b.QuoteSubAccountID equals sa.QuoteSubAccountID
+                                           join g in db.QuoteInterestCalculationGroups on sa.QuoteInterestCalculationGroupID equals g.QuoteInterestCalculationGroupID
+                                           join q in db.Quotes on g.QuoteID equals q.QuoteID
+                                           join e in db.Entities on q.EntityID equals e.EntityID
+                                           where t.JournalID == bet.ID
+                                           select new TransactionDto
+                                           {
+                                               BusinessEventTaskID = task.BusinessEventTaskID,
+                                               QuoteID = q.QuoteID,
+                                               QuoteInterestCalculationGroupID = g.QuoteInterestCalculationGroupID,
+                                               QuoteSubAccountID = b.QuoteSubAccountID,
+                                               SubAccountName = sa.ShortName,
+                                               EntityID = t.EntityID,
+                                               EntityName = e.EntityName,
+                                               ExportFileID = t.ExportFileID,
+                                               ForcedReferencing = t.ForcedReferencing,
+                                               BucketID = t.BucketID,
+                                               BankAccountTypeID = t.BankAccountTypeID,
+                                               BankAccountTransactionID = t.BankAccountTransactionID,
+                                               TransactionStatusID = t.TransactionStatusID,
+                                               AuthorisationLevelID = t.AuthorisationLevelID,
+                                               TransactionID = t.TransactionID,
+                                               TransactionSubTypeID = t.TransactionSubTypeID,
+                                               TransactionTypeID = t.TransactionTypeID,
+                                               ServiceTypeID = t.ServiceTypeID,
+                                               ServiceChannelID = t.ServiceChannelID,
+                                               AccountHolder = t.AccountHolder,
+                                               AccountNumber = t.AccountNumber,
+                                               ActionDate = t.ActionDate,
+                                               RealTime = t.ServiceTypeID == (int)ServiceTypeEnum.Realtime,
+                                               Amount = t.Amount,
+                                               JournalID = t.JournalID,
+                                               ClientImportFileID = t.ClientImportFileID,
+                                               TransactionReference = t.TransactionReference,
+                                               IsNominated = t.IsNominatedParty == null ? "No" : t.IsNominatedParty == false ? "No" : "Yes",
+                                               TransactionExceptions = texg.Select(x => new TransactionExceptionDto
+                                               {
+                                                   ExceptionMessageID = x.ExceptionMessageID,
+                                                   TransactionExceptionID = x.TransactionExceptionID,
+                                                   TransactionID = x.TransactionID,
+                                               }).ToList(),
+                                               Exceptions = texg.Select(z => new ExceptionMessageDto
+                                               {
+                                                   ExceptionMessageID = z.ExceptionMessageID,
+                                                   ExceptionCode = z.ExceptionMessage.ExceptionCode,
+                                                   ShortDescription = z.ExceptionMessage.ShortDescription,
+                                                   LongDescription = z.ExceptionMessage.LongDescription,
+                                                   IsNoteMandatoryOnCapture = z.ExceptionMessage.IsNoteMandatoryOnCapture,
+                                                   IsNoteMandatoryOnLVL1 = z.ExceptionMessage.IsNoteMandatoryOnLVL1,
+                                                   IsNoteMandatoryOnLVL2 = z.ExceptionMessage.IsNoteMandatoryOnLVL2,
+                                                   IsNoteMandatoryOnLVLQC = z.ExceptionMessage.IsNoteMandatoryOnLVLQC,
+                                                   MustGotoLevel2 = z.ExceptionMessage.MustGotoLevel2,
+                                                   ExceptionMessageContextID = z.ExceptionMessage.ExceptionMessageContextID,
+                                                   TransactionExceptionID = z.TransactionExceptionID
+                                               }).ToList(),
+                                               CollectionPeriodStartDate = b.StartDate,
+                                               CollectionPeriodEndDate = b.EndDate,
+                                           }).ToListAsync();
+
+                var firstTransaction = task.Transactions.FirstOrDefault();
+                if (firstTransaction == null)
+                    task.TransactionStatusID = (int)TransactionStatusEnum.Suspended;
+                else
+                    task.TransactionStatusID = firstTransaction.TransactionStatusID;
+                if (!task.Transactions.Any())
+                    throw new Exception(string.Format("These Transactions have already been authorised! Please Close Task ID: {0}", task.BusinessEventTaskID));
+
+                task.JournalGroup = new JournalGroupDto()
+                {
+                    ActionDate = task.Transactions.First().ActionDate,
+                    BusinessEventTaskID = task.BusinessEventTaskID,
+                    DebitAmount = task.Transactions.First().Amount,
+                    JournalGroupID = task.Transactions.First().JournalID.Value,
+                    TransactionCount = task.Transactions.Count()
+                };
+            }
+
+            return returnVal;
+        }
+
+        public async Task<NotAuthorizedDto> GetLoadNotAuthorizedTransactionsForTransactions()
+        {
+            var db = Locator.DBContext;
+
+            NotAuthorizedDto returnVal = new NotAuthorizedDto();
+            UserUserDto currentUser = Thread.CurrentPrincipal.GetUser();
+            var entityId = HttpHeaderUtility.Value.GetHeaderValue<int>(HttpHeaderKeys.EntityID);
+
+            returnVal.Tasks = await (from bet in db.BusinessEventTasks
+                                     join be in db.BusinessEvents on bet.BusinessEventID equals be.BusinessEventID
+                                     join betu in db.BusinessEventTaskUsers on bet.BusinessEventTaskID equals betu.BusinessEventTaskID
+                                     where !bet.EndDate.HasValue
+                                        && betu.UserID == currentUser.UserID
+                                        && bet.EntityID == entityId
+                                        && (
+                                            be.BusinessEventID == (int)BusinessEventEnum._ExternalAuthorisationLevelOne ||
+                                            be.BusinessEventID == (int)BusinessEventEnum._ExternalAuthorisationLevelTwo ||
+                                            be.BusinessEventID == (int)BusinessEventEnum._ExternalAuthorisationLevelThree ||
+                                            be.BusinessEventID == (int)BusinessEventEnum._InternalAuthorisationLevelOne ||
+                                            be.BusinessEventID == (int)BusinessEventEnum._InternalAuthorisationLevelTwo ||
+                                            be.BusinessEventID == (int)BusinessEventEnum._InternalAuthorisationLevelThree ||
+                                            be.BusinessEventID == (int)BusinessEventEnum._InternalAuthorisationQualityControl
+                                           )
+                                        && (bet.ClassTypeID == (int)ClassTypeEnum.Transaction)
+                                     select new BusinessEventTaskDto
+                                     {
+                                         EntityID = bet.EntityID,
+                                         TaskMessage = bet.TaskMessage,
+                                         BusinessEventID = bet.BusinessEventID,
+                                         BusinessEventTaskID = bet.BusinessEventTaskID,
+                                         ID = bet.ID,
+                                         ClassTypeID = bet.ClassTypeID,
+                                         EndDate = bet.EndDate,
+                                     }).ToListAsync();
+
+            foreach (var task in returnVal.Tasks)
+            {
+                var transactionStatus = db.Transactions.FirstOrDefault(x => x.TransactionID == task.ID);
+                if (transactionStatus != null)
+                    task.TransactionStatusID = transactionStatus.TransactionStatusID;
+                else
+                    task.TransactionStatusID = (int)TransactionStatusEnum.Suspended; //This happens when there are no transactions relating to ClientImportFile this allows the screen to still load for other tasks.
+
+                var bet = db.BusinessEventTasks.FirstOrDefault(x => x.BusinessEventTaskID == task.BusinessEventTaskID);
+
+                task.Transactions = await (from t in db.Transactions
+                                           join tt in db.TransactionTypes on t.TransactionTypeID equals tt.TransactionTypeID
+                                           join tex in db.TransactionExceptions on t.TransactionID equals tex.TransactionID into texg
+                                           join b in db.Buckets on t.BucketID equals b.BucketID
+                                           join sa in db.QuoteSubAccounts on b.QuoteSubAccountID equals sa.QuoteSubAccountID
+                                           join g in db.QuoteInterestCalculationGroups on sa.QuoteInterestCalculationGroupID equals g.QuoteInterestCalculationGroupID
+                                           join q in db.Quotes on g.QuoteID equals q.QuoteID
+                                           join e in db.Entities on q.EntityID equals e.EntityID
+                                           where t.BusinessEventTaskID == task.BusinessEventTaskID && t.TransactionID == bet.ID
+                                           select new TransactionDto
+                                           {
+                                               BusinessEventTaskID = task.BusinessEventTaskID,
+                                               ServiceID = tt.ServiceID,
+                                               SubAccountName = sa.ShortName,
+                                               RealTime = t.ServiceTypeID == (int)ServiceTypeEnum.Realtime,
+                                               QuoteID = q.QuoteID,
+                                               QuoteInterestCalculationGroupID = g.QuoteInterestCalculationGroupID,
+                                               QuoteSubAccountID = b.QuoteSubAccountID,
+                                               EntityID = t.EntityID,
+                                               EntityName = e.EntityName,
+                                               ExportFileID = t.ExportFileID,
+                                               ForcedReferencing = t.ForcedReferencing,
+                                               BucketID = t.BucketID,
+                                               BankAccountTypeID = t.BankAccountTypeID,
+                                               BankAccountTransactionID = t.BankAccountTransactionID,
+                                               TransactionStatusID = t.TransactionStatusID,
+                                               TransactionID = t.TransactionID,
+                                               TransactionSubTypeID = t.TransactionSubTypeID,
+                                               TransactionTypeID = t.TransactionTypeID,
+                                               ServiceTypeID = t.ServiceTypeID,
+                                               ServiceChannelID = t.ServiceChannelID,
+                                               AccountHolder = t.AccountHolder,
+                                               AccountNumber = t.AccountNumber,
+                                               ActionDate = t.ActionDate,
+                                               Amount = t.Amount,
+                                               JournalID = t.JournalID,
+                                               ClientImportFileID = t.ClientImportFileID,
+                                               TransactionReference = t.TransactionReference,
+                                               IsNominated = t.IsNominatedParty == null ? "No" : t.IsNominatedParty == false ? "No" : "Yes",
+                                               TransactionExceptions = texg.Select(x => new TransactionExceptionDto
+                                               {
+                                                   ExceptionMessageID = x.ExceptionMessageID,
+                                                   TransactionExceptionID = x.TransactionExceptionID,
+                                                   TransactionID = x.TransactionID,
+                                               }).ToList(),
+                                               Exceptions = texg.Select(z => new ExceptionMessageDto
+                                               {
+                                                   ExceptionMessageID = z.ExceptionMessageID,
+                                                   ExceptionCode = z.ExceptionMessage.ExceptionCode,
+                                                   ShortDescription = z.ExceptionMessage.ShortDescription,
+                                                   LongDescription = z.ExceptionMessage.LongDescription,
+                                                   IsNoteMandatoryOnCapture = z.ExceptionMessage.IsNoteMandatoryOnCapture,
+                                                   IsNoteMandatoryOnLVL1 = z.ExceptionMessage.IsNoteMandatoryOnLVL1,
+                                                   IsNoteMandatoryOnLVL2 = z.ExceptionMessage.IsNoteMandatoryOnLVL2,
+                                                   IsNoteMandatoryOnLVLQC = z.ExceptionMessage.IsNoteMandatoryOnLVLQC,
+                                                   MustGotoLevel2 = z.ExceptionMessage.MustGotoLevel2,
+                                                   ExceptionMessageContextID = z.ExceptionMessage.ExceptionMessageContextID,
+                                                   TransactionExceptionID = z.TransactionExceptionID
+                                               }).ToList(),
+                                               CollectionPeriodStartDate = b.StartDate,
+                                               CollectionPeriodEndDate = b.EndDate,
+                                           }).ToListAsync();
+            }
+
+            return returnVal;
+        }
+
+        public async Task<NotAuthorizedDto> GetLoadNotAuthorizedTransactionsForImport()
+        {
+            var db = Locator.DBContext;
+
+            NotAuthorizedDto returnVal = new NotAuthorizedDto();
+            UserUserDto currentUser = Thread.CurrentPrincipal.GetUser();
+            var entityId = HttpHeaderUtility.Value.GetHeaderValue<int>(HttpHeaderKeys.EntityID);
+
+            var tasks = await _unitOfWork.QueryAsync<BusinessEventTaskFileDto>(StoredProcedureNames.GetNotAuthorizedTransactionsForImport, param: new { EntityID = entityId, UserID = currentUser.UserID }, commandType: CommandType.StoredProcedure);
+            returnVal.Tasks = (from bet in tasks
+                               select new BusinessEventTaskDto
+                               {
+                                   EntityID = bet.EntityID,
+                                   TaskMessage = bet.TaskMessage,
+                                   BusinessEventID = bet.BusinessEventID,
+                                   BusinessEventTaskID = bet.BusinessEventTaskID,
+                                   ID = bet.ID,
+                                   ClassTypeID = bet.ClassTypeID,
+                                   EndDate = bet.EndDate,
+                                   TransactionStatusID = bet.TransactionStatusID,
+                                   File = new ClientImportFileDto
+                                   {
+                                       BucketID = bet.BucketID,
+                                       BusinessEventTaskID = bet.BusinessEventTaskID,
+                                       ClientImportFileID = bet.ClientImportFileID,
+                                       EntityID = bet.EntityID,
+                                       FileName = bet.FileName,
+                                       FTPSequence = bet.FTPSequence,
+                                       Hash = bet.Hash,
+                                       ImportDateTime = bet.ImportDateTime,
+                                       NoOfTransactions = bet.NoOfTransactions,
+                                       ProgramID = bet.ProgramID,
+                                       QuoteSubAccountID = bet.QuoteSubAccountID,
+                                       ServiceID = bet.ServiceID,
+                                       TotalAmount = bet.TotalAmount,
+                                       UISequence = bet.UISequence,
+                                       DueDate = bet.DueDate
+                                   },
+                               }).ToList();
+
+            return returnVal;
+        }
+
+        public NotAuthorizedDto LoadNotAuthorizedTransactionsForLoggedInUser()
+        {
+            var db = Locator.DBContext;
+
+            NotAuthorizedDto returnVal = new NotAuthorizedDto();
+            UserUserDto currentUser = Thread.CurrentPrincipal.GetUser();
+            var entityId = HttpHeaderUtility.Value.GetHeaderValue<int>(HttpHeaderKeys.EntityID);
+
+            returnVal.Tasks = (from bet in db.BusinessEventTasks
+                               join be in db.BusinessEvents on bet.BusinessEventID equals be.BusinessEventID
+                               join betu in db.BusinessEventTaskUsers on bet.BusinessEventTaskID equals betu.BusinessEventTaskID
+                               where !bet.EndDate.HasValue
+                                  && betu.UserID == currentUser.UserID
+                                  && bet.EntityID == entityId
+                                  && (
+                                      be.BusinessEventID == (int)BusinessEventEnum._ExternalAuthorisationLevelOne ||
+                                      be.BusinessEventID == (int)BusinessEventEnum._ExternalAuthorisationLevelTwo ||
+                                      be.BusinessEventID == (int)BusinessEventEnum._ExternalAuthorisationLevelThree ||
+                                      be.BusinessEventID == (int)BusinessEventEnum._InternalAuthorisationLevelOne ||
+                                      be.BusinessEventID == (int)BusinessEventEnum._InternalAuthorisationLevelTwo ||
+                                      be.BusinessEventID == (int)BusinessEventEnum._InternalAuthorisationLevelThree ||
+                                      be.BusinessEventID == (int)BusinessEventEnum._InternalAuthorisationQualityControl
+                                     )
+                                  && (bet.ClassTypeID == (int)ClassTypeEnum.Transaction ||
+                                      bet.ClassTypeID == (int)ClassTypeEnum.Journal ||
+                                      bet.ClassTypeID == (int)ClassTypeEnum.ClientImportFile)
+                               select new BusinessEventTaskDto
+                               {
+                                   EntityID = bet.EntityID,
+                                   TaskMessage = bet.TaskMessage,
+                                   BusinessEventID = bet.BusinessEventID,
+                                   BusinessEventTaskID = bet.BusinessEventTaskID,
+                                   ID = bet.ID,
+                                   ClassTypeID = bet.ClassTypeID,
+                                   EndDate = bet.EndDate,
+                               }).ToList();
+
+            foreach (var task in returnVal.Tasks)
+            {
+                var classType = (ClassTypeEnum)task.ClassTypeID;
+                switch (classType)
+                {
+                    case ClassTypeEnum.Transaction:
+
+                        var transactionStatus = db.Transactions.FirstOrDefault(x => x.TransactionID == task.ID);
+                        if (transactionStatus != null)
+                            task.TransactionStatusID = transactionStatus.TransactionStatusID;
+                        else
+                            task.TransactionStatusID = (int)TransactionStatusEnum.Suspended; //This happens when there are no transactions relating to ClientImportFile this allows the screen to still load for other tasks.
+
+                        task.Transactions = LoadTransactionsForBusinessEvent(task.BusinessEventTaskID, ClassTypeEnum.Transaction);
+                        break;
+
+                    case ClassTypeEnum.ClientImportFile:
+
+                        transactionStatus = db.Transactions.FirstOrDefault(x => x.ClientImportFileID == task.ID);
+                        if (transactionStatus != null)
+                            task.TransactionStatusID = transactionStatus.TransactionStatusID;
+                        else
+                            task.TransactionStatusID = (int)TransactionStatusEnum.Suspended;
+
+                        var file = db.ClientImportFiles.FirstOrDefault(x => x.ClientImportFileID == task.ID);
+
+                        task.File = new ClientImportFileDto()
+                        {
+                            BucketID = file.BucketID,
+                            BusinessEventTaskID = task.BusinessEventTaskID,
+                            ClientImportFileID = file.ClientImportFileID,
+                            EntityID = file.EntityID,
+                            FileName = file.FileName,
+                            FTPSequence = file.FTPSequence,
+                            Hash = file.Hash,
+                            ImportDateTime = file.ImportDateTime,
+                            NoOfTransactions = file.NoOfTransactions,
+                            ProgramID = file.ProgramID,
+                            QuoteSubAccountID = file.QuoteSubAccountID,
+                            ServiceID = file.ServiceID,
+                            TotalAmount = file.TotalAmount,
+                            UISequence = file.UISequence
+                        };
+                        break;
+
+                    case ClassTypeEnum.Journal:
+
+                        task.Transactions = LoadTransactionsForBusinessEvent(task.BusinessEventTaskID, ClassTypeEnum.Journal);
+                        task.TransactionStatusID = task.Transactions.FirstOrDefault().TransactionStatusID;
+                        task.JournalGroup = new JournalGroupDto()
+                        {
+                            ActionDate = task.Transactions.First().ActionDate,
+                            BusinessEventTaskID = task.BusinessEventTaskID,
+                            DebitAmount = task.Transactions.First().Amount,
+                            JournalGroupID = task.Transactions.First().JournalID.Value,
+                            TransactionCount = task.Transactions.Count()
+                        };
+                        break;
+                }
+            }
+
+            return returnVal;
+        }
+
+        private ClientImportFileDto GetFile(int t, int id, int businessEventTaskID)
+        {
+            var db = Locator.DBContext;
+
+            if (t != (int)ClassTypeEnum.ClientImportFile)
+                return null;
+
+            ClientImportFileDto returnVal = db.ClientImportFiles.FirstOrDefault(x => x.ClientImportFileID == id).ToDTO();
+            if (returnVal == null)
+                return null;
+
+            returnVal.BusinessEventTaskID = businessEventTaskID;
+
+            var total = db.Transactions.Where(tr => tr.ClientImportFileID == id)
+                                       .Where(tr => tr.TransactionStatusID == (int)TransactionStatusEnum.AwaitingAuthorisation)
+                                       .Sum(tr => tr.Amount);
+            returnVal.TotalAmount = total;
+
+            return returnVal;
+        }
+
+        [Cache]
+        public virtual CreditItemLimitExceededDto GetCreditItemLimitExceeded(int bucketID)
+        {
+            var _unitOfWork = Locator.Get<IUnitOfWork<DBOEntities>>();
+            return _unitOfWork.Query<CreditItemLimitExceededDto>(StoredProcedureNames.CreditItemLimitExceeded, param: new { BucketID = bucketID }, commandType: CommandType.StoredProcedure).FirstOrDefault();
+        }
+
+        public bool IsCreditItemLimitExceeded(TransactionDto dto)
+        {
+            var rule = GetCreditItemLimitExceeded(dto.BucketID);
+            double creditLimit = 0;
+            if (rule.SubAccountCreditTransactionLimit.HasValue)
+                creditLimit = rule.SubAccountCreditTransactionLimit.Value;
+            else
+                if (rule.CreditTransactionLimit.HasValue)
+                creditLimit = rule.CreditTransactionLimit.Value;
+
+            if (creditLimit == 0)
+                return false;
+            else
+                if (dto.Amount > creditLimit)
+                return true;
+            else
+                return false;
+        }
+
+        public bool IsDebitItemLimitExceeded(TransactionDto dto)
+        {
+            Bucket bucket = GetBucket(dto.BucketID);
+            QuoteSubAccount quoteSubAccount = GetSubAccount(bucket.QuoteSubAccountID);
+
+            double debitLimit = 0;
+            if (quoteSubAccount.DebitTransactionLimit != null)
+                debitLimit = quoteSubAccount.DebitTransactionLimit.Value;
+            else
+            {
+                QuoteInterestCalculationGroup quoteInterestCalculationGroup = GetInterestGroup(quoteSubAccount.QuoteInterestCalculationGroupID);
+                if (quoteInterestCalculationGroup.DebitTransactionLimit != null)
+                    debitLimit = quoteInterestCalculationGroup.DebitTransactionLimit.Value;
+            }
+
+            if (debitLimit == 0)
+                return false;
+            else
+                if (dto.Amount > debitLimit)
+                return true;
+            else
+                return false;
+        }
+
+        public TransactionDocDto LoadTransactionDocument(int id)
+        {
+            var db = Locator.DBContext;
+            db.Configuration.ProxyCreationEnabled = true;
+
+            var t = db.Transactions.Find(id);
+            if (t == null)
+                return null;
+
+            if (t.ClientImportFileID == null)
+                return new TransactionDocDto()
+                {
+                    TransactionID = id,
+                    InstructionFileType = t.InstructionFileType,
+                    InstructionFileWebType = t.InstructionFileWebType,
+                    File = ((t.InstructionFile == null) ? "" : Convert.ToBase64String(t.InstructionFile))
+                };
+            else
+            {
+                var cif = db.ClientImportFiles.FirstOrDefault(x => x.ClientImportFileID == t.ClientImportFileID);
+                if (cif == null)
+                    return null;
+
+                return new TransactionDocDto()
+                {
+                    TransactionID = id,
+                    InstructionFileType = cif.InstructionFileType,
+                    InstructionFileWebType = cif.InstructionFileWebType,
+                    File = ((cif.InstructionFile == null) ? "" : Convert.ToBase64String(cif.InstructionFile))
+                };
+            }
+        }
+
+        public TransactionRecallInfoDto GetRecallInfo(int transactionId)
+        {
+            using (var db = Locator.DBContext)
+            {
+                db.Configuration.ProxyCreationEnabled = true;
+                var recallInfoDto = (from t in db.Transactions
+                                     join b in db.Buckets on t.BucketID equals b.BucketID
+                                     join qsa in db.QuoteSubAccounts on b.QuoteSubAccountID equals qsa.QuoteSubAccountID
+                                     join qicg in db.QuoteInterestCalculationGroups on qsa.QuoteInterestCalculationGroupID equals
+                                         qicg.QuoteInterestCalculationGroupID
+                                     where t.TransactionID == transactionId
+                                     select new TransactionRecallInfoDto
+                                     {
+                                         TransactionID = t.TransactionID,
+                                         BucketID = t.BucketID,
+                                         QuoteSubAccountID = qsa.QuoteSubAccountID,
+                                         QuoteInterestCalculationGroupID = qicg.QuoteInterestCalculationGroupID,
+                                         QuoteID = qicg.QuoteID,
+                                         ActionDate = t.ActionDate,
+                                         ClientImportFileID = t.ClientImportFileID
+                                     }).FirstOrDefault();
+
+                return recallInfoDto;
+            }
+        }
+
+        [Cache]
+        public virtual bool IsPossibleDuplicatePayment(int bucketID, int entityID, string accountNumber, double amount)
+        {
+            var db = Locator.DBContext;
+
+            Bucket bucket = GetBucket(bucketID);
+            QuoteSubAccount quoteSubAccount = GetSubAccount(bucket.QuoteSubAccountID);
+            bool? checkDuplicatePayment = null;
+
+            if (quoteSubAccount.CheckDuplicatePayment != null)
+                checkDuplicatePayment = quoteSubAccount.CheckDuplicatePayment.Value;
+            else
+            {
+                QuoteInterestCalculationGroup quoteInterestCalculationGroup = GetInterestGroup(quoteSubAccount.QuoteInterestCalculationGroupID);
+                if (quoteInterestCalculationGroup.CheckDuplicatePayment != null)
+                    checkDuplicatePayment = quoteInterestCalculationGroup.CheckDuplicatePayment.Value;
+            }
+
+            if (checkDuplicatePayment == null)
+                return false;
+            else
+            {
+                if (checkDuplicatePayment.Value == false)
+                    return false;
+                else
+                {
+                    DateTime todaysDate = DateTime.Today.Date;
+                    DateTime pastThirtyDaysDate = todaysDate.AddDays(-30).Date;
+                    string accountNumberPadded = BankAccountUtility.PadAccountNumber(accountNumber);
+                    var transactions = db.Transactions.Where(e => e.EntityID == entityID &&
+                                                                  DbFunctions.TruncateTime(e.CreationDate) >= DbFunctions.TruncateTime(pastThirtyDaysDate) &&
+                                                                  (e.AccountNumber == accountNumber || e.AccountNumber == accountNumberPadded) &&
+                                                                  e.Amount == amount &&
+                                                                  activeTransactionStatuses.Contains(e.TransactionStatusID)
+                                                                  ).FromCache();
+
+                    return transactions.Any();
+                }
+            }
+        }
+
+        public DuplicatePaymentIndDtos GetDuplicatePaymentInd(int bucketID)
+        {
+            var _unitOfWork = Locator.Get<IUnitOfWork<DBOEntities>>();
+            return _unitOfWork.Query<DuplicatePaymentIndDtos>(StoredProcedureNames.GetDuplicatePaymentInd, param: new { BucketID = bucketID }, commandType: CommandType.StoredProcedure).FirstOrDefault();
+        }
+
+        [Cache(CacheType = CacheType.Memory)]
+        public virtual bool IsDuplicatePayment(TransactionDto dto)
+        {
+            var dtoRule = GetDuplicatePaymentInd(dto.BucketID);
+            var duplicatePaymentInd = dtoRule.SubAccountDuplicatePaymentInd;
+
+            if (!duplicatePaymentInd.HasValue)
+                duplicatePaymentInd = dtoRule.DuplicatePaymentInd;
+
+            if (!duplicatePaymentInd.HasValue || !duplicatePaymentInd.Value)
+                return false;
+
+            var duplicatePaymentsExist = DuplicatePaymentsExist(dto.EntityID, dto.BucketID, dto.ActionDate, dto.AccountNumberPadded, dto.Amount);
+
+            return duplicatePaymentsExist;
+        }
+
+        [Cache(CacheType = CacheType.Memory)]
+        private bool DuplicatePaymentsExist(int entityID, int bucketID, DateTime actionDate, string accountNumber, double amount)
+        {
+            var unitOfWork = Locator.Get<IUnitOfWork<DBOEntities>>();
+            var args = new
+            {
+                EntityID = entityID,
+                BucketID = bucketID,
+                ActionDate = actionDate,
+                AccountNumber = accountNumber,
+                Amount = amount
+            };
+            var result = unitOfWork.Query<int>(StoredProcedureNames.GetTransactionExists, param: args, commandType: CommandType.StoredProcedure).FirstOrDefault() > 0;
+
+            return result;
+        }
+
+        private bool DuplicateCollectionsExist(int bucketID, DateTime actionDate, string accountNumber, double amount)
+        {
+            var unitOfWork = Locator.Get<IUnitOfWork<DBOEntities>>();
+            var args = new
+            {
+                BucketID = bucketID,
+                ActionDate = actionDate,
+                AccountNumber = accountNumber,
+                Amount = amount
+            };
+            var result = unitOfWork.Query<int>(StoredProcedureNames.CollectionTransactionExists, param: args, commandType: CommandType.StoredProcedure).FirstOrDefault() > 0;
+
+            return result;
+        }
+
+        public bool IsDuplicateCollection(TransactionDto dto)
+        {
+            var db = Locator.DBContext;
+            db.Configuration.ProxyCreationEnabled = true;
+
+            var bucket = GetBucket(dto.BucketID);
+            var quoteSubAccount = GetSubAccount(bucket.QuoteSubAccountID);
+            var duplicateCollectionInd = quoteSubAccount.DuplicateCollectionInd;
+
+            if (!duplicateCollectionInd.HasValue)
+            {
+                var quoteInterestCalculationGroup = GetInterestGroup(quoteSubAccount.QuoteInterestCalculationGroupID);
+                duplicateCollectionInd = quoteInterestCalculationGroup.DuplicateCollectionInd;
+            }
+
+            if (!duplicateCollectionInd.HasValue || !duplicateCollectionInd.Value)
+                return false;
+
+            var result = DuplicateCollectionsExist(dto.BucketID, dto.ActionDate, dto.AccountNumberPadded, dto.Amount);
+
+            return result;
+        }
+
+        [Cache]
+        public virtual int TransactionsExist(int bucketID, double amount)
+        {
+            var db = Locator.DBContext;
+            db.Configuration.ProxyCreationEnabled = true;
+            return (from t in db.Transactions
+                    join tt in db.TransactionTypes on t.TransactionTypeID equals tt.TransactionTypeID
+                    where t.BucketID == bucketID
+                       && activeTransactionStatuses.Contains(t.TransactionStatusID)
+                       && t.Amount == amount
+                       && (tt.ServiceID.HasValue && tt.ServiceID.Value == (int)ServiceEnum.Payments)
+                    select t).Count();
+        }
+
+        public bool DuplicatePaymentAmount(TransactionDto dto)
+        {
+            _log.Debug("Running Method: DuplicatePaymentAmount");
+            IEnumerable<TransactionTypeSubTypeConfigurationDto> transactionTypeSubTypeConfiguration = TransactionTypeSubTypeConfigurationRepo.Value.GetTransactionTypeSubTypeConfiguration(dto.BucketID);
+
+            if (transactionTypeSubTypeConfiguration.Count() > 0)
+            {
+                var config = transactionTypeSubTypeConfiguration.Where(e => e.TransactionTypeID == dto.TransactionTypeID && e.TransactionSubTypeID == dto.TransactionSubTypeID).FirstOrDefault();
+                if (config == null)
+                {
+                    _log.DebugFormat("Failed to get config for Duplicate Payment Amount - TransactionTypeID: {0}, TransactionSubTypeID: {1}", dto.TransactionTypeID, dto.TransactionSubTypeID);
+                    return false;
+                }
+                bool? duplicatePaymentAmount = config.DuplicatePayment;
+                if ((duplicatePaymentAmount != null) && (duplicatePaymentAmount.Value == true))
+                {
+                    var checkExists = TransactionsExist(dto.BucketID, dto.Amount);
+                    if (checkExists > 0)
+                        return true;
+                    else
+                        return false;
+                }
+            }
+
+            return false;
+        }
+
+        public bool UnpaidDebitOrderRule(TransactionDto dto)
+        {
+            var db = Locator.DBContext;
+            db.Configuration.ProxyCreationEnabled = true;
+
+            if (dto.TransactionTypeID == (int)TransactionTypeEnum.Refund || dto.TransactionTypeID == (int)TransactionTypeEnum.Claims)
+            {
+                Bucket bucket = GetBucket(dto.BucketID);
+                QuoteSubAccount quoteSubAccount = GetSubAccount(bucket.QuoteSubAccountID);
+
+                bool? UnpaidDebitOrderInd = null;
+                if (quoteSubAccount.UnpaidDebitOrderInd.GetValueOrDefault())
+                    UnpaidDebitOrderInd = quoteSubAccount.UnpaidDebitOrderInd.Value;
+                else
+                {
+                    QuoteInterestCalculationGroup quoteInterestCalculationGroup = GetInterestGroup(quoteSubAccount.QuoteInterestCalculationGroupID);
+                    if (quoteInterestCalculationGroup.UnpaidDebitOrderInd.GetValueOrDefault())
+                        UnpaidDebitOrderInd = quoteInterestCalculationGroup.UnpaidDebitOrderInd.Value;
+                }
+
+                if (UnpaidDebitOrderInd.GetValueOrDefault() == false)
+                    return false;
+                else
+                {
+                    if (UnpaidDebitOrderInd.GetValueOrDefault() == false)
+                        return false;
+                    else
+                    {
+                        var linkedBucketList = GetLinkedBucketList(dto.TransactionTypeID, quoteSubAccount.QuoteSubAccountID, quoteSubAccount.QuoteInterestCalculationGroupID);
+                        if (linkedBucketList == null || linkedBucketList.Count() == 0)
+                        {
+                            linkedBucketList = GetNonSubAccountLinkedBucketList(dto.TransactionTypeID, quoteSubAccount.QuoteInterestCalculationGroupID);
+                            if (linkedBucketList == null || linkedBucketList.Count() == 0)
+                                return false;
+                        }
+
+                        DateTime threeMonthsPrior = dto.ActionDate.AddMonths(-3);
+                        threeMonthsPrior = threeMonthsPrior.AddDays((threeMonthsPrior.Day - 1) * -1);
+                        string accountNumberPadded = dto.AccountNumberPadded;
+                        string accountNumber = dto.AccountNumber;
+                        var exists = (from t in db.Transactions
+                                      join tt in db.TransactionTypes on t.TransactionTypeID equals tt.TransactionTypeID
+                                      where linkedBucketList.Contains(t.BucketID)
+                                         && t.TransactionStatusID == (int)TransactionStatusEnum.Processed
+                                         && t.TransactionTypeID == (int)TransactionTypeEnum.CollectionRejection
+                                         && t.ActionDate >= threeMonthsPrior
+                                         && (t.AccountNumber == accountNumberPadded ||
+                                             t.AccountNumber == accountNumber)
+                                      select t).Count();
+
+                        if (exists > 0)
+                            return true;
+                        else
+                            return false;
+                    }
+                }
+            }
+            else
+                return false;
+        }
+
+        public virtual Bucket GetBucket(int bucketID)
+        {
+            var db = Locator.DBContext;
+            db.Configuration.ProxyCreationEnabled = false;
+            return db.Buckets.Where(x => x.BucketID == bucketID).FromCache().SingleOrDefault();
+        }
+
+        public virtual QuoteSubAccount GetSubAccount(int quoteSubAccountID)
+        {
+            var db = Locator.DBContext;
+            db.Configuration.ProxyCreationEnabled = false;
+            return db.QuoteSubAccounts.Where(e => e.QuoteSubAccountID == quoteSubAccountID).FromCache().SingleOrDefault();
+        }
+
+        public virtual QuoteInterestCalculationGroup GetInterestGroup(int quoteInterestCalculationGroupID)
+        {
+            var db = Locator.DBContext;
+            db.Configuration.ProxyCreationEnabled = false;
+            return db.QuoteInterestCalculationGroups.Where(e => e.QuoteInterestCalculationGroupID == quoteInterestCalculationGroupID).FromCache().SingleOrDefault();
+        }
+
+        [Cache]
+        public virtual int[] GetLinkedBucketList(int transactionTypeID, int quoteSubAccountID, int quoteInterestCalculationGroupID)
+        {
+            var _unitOfWork = Locator.Get<IUnitOfWork<DBOEntities>>();
+            return _unitOfWork.Query<int>(StoredProcedureNames.GetLinkedBucketList, param: new { QuoteInterestCalculationGroupID = quoteInterestCalculationGroupID, QuoteSubAccountID = quoteSubAccountID, TransactionTypeID = transactionTypeID }, commandType: CommandType.StoredProcedure).ToArray();
+        }
+
+        [Cache]
+        public virtual int[] GetNonSubAccountLinkedBucketList(int transactionTypeID, int quoteInterestCalculationGroupID)
+        {
+            var _unitOfWork = Locator.Get<IUnitOfWork<DBOEntities>>();
+            return _unitOfWork.Query<int>(StoredProcedureNames.GetLinkedBucketList, param: new { QuoteInterestCalculationGroupID = quoteInterestCalculationGroupID, TransactionTypeID = transactionTypeID }, commandType: CommandType.StoredProcedure).ToArray();
+        }
+
+        public bool PreviousDebitOrderRule(TransactionDto dto)
+        {
+            var db = Locator.DBContext;
+            db.Configuration.ProxyCreationEnabled = true;
+            if (dto.TransactionTypeID == (int)TransactionTypeEnum.Refund || dto.TransactionTypeID == (int)TransactionTypeEnum.Claims)
+            {
+                var bucket = GetBucket(dto.BucketID);
+                QuoteSubAccount quoteSubAccount = GetSubAccount(bucket.QuoteSubAccountID);
+
+                bool? PreviousDebitOrderInd = null;
+                if (quoteSubAccount.PreviousDebitOrderInd != null)
+                    PreviousDebitOrderInd = quoteSubAccount.PreviousDebitOrderInd.Value;
+                else
+                {
+                    QuoteInterestCalculationGroup quoteInterestCalculationGroup = GetInterestGroup(quoteSubAccount.QuoteInterestCalculationGroupID);
+                    if (quoteInterestCalculationGroup.PreviousDebitOrderInd != null)
+                        PreviousDebitOrderInd = quoteInterestCalculationGroup.PreviousDebitOrderInd.Value;
+                }
+
+                if (PreviousDebitOrderInd == null)
+                    return false;
+                else
+                {
+                    if (PreviousDebitOrderInd.Value == false)
+                        return false;
+                    else
+                    {
+                        var linkedBucketList = GetLinkedBucketList(dto.TransactionTypeID, quoteSubAccount.QuoteSubAccountID, quoteSubAccount.QuoteInterestCalculationGroupID);
+                        if (linkedBucketList == null || linkedBucketList.Count() == 0)
+                        {
+                            linkedBucketList = GetNonSubAccountLinkedBucketList(dto.TransactionTypeID, quoteSubAccount.QuoteInterestCalculationGroupID);
+                            if (linkedBucketList == null || linkedBucketList.Count() == 0)
+                                return false;
+                        }
+
+                        DateTime threeMonthsPrior = dto.ActionDate.AddMonths(-3);
+                        threeMonthsPrior = threeMonthsPrior.AddDays((threeMonthsPrior.Day - 1) * -1);
+                        int exists = db.Transactions.Where(e => linkedBucketList.Contains(e.BucketID)
+                                                             && (e.AccountNumber == dto.AccountNumberPadded || e.AccountNumber == dto.AccountNumber)
+                                                             && e.TransactionStatusID == (int)TransactionStatusEnum.Processed
+                                                             && e.TransactionTypeID == (int)TransactionTypeEnum.Collection
+                                                             && e.ActionDate >= threeMonthsPrior)
+                                                    .Count();
+
+                        if (exists > 0)
+                            return false;
+                        else
+                            return true;
+                    }
+                }
+            }
+            else
+                return false;
+        }
+
+        [Cache]
+        public virtual bool IsDuplicateAccountRule(TransactionDto dto)
+        {
+            var db = Locator.DBContext;
+            db.Configuration.ProxyCreationEnabled = true;
+
+            if (dto.TransactionTypeID != (int)TransactionTypeEnum.Refund && dto.TransactionTypeID != (int)TransactionTypeEnum.Claims)
+                return false;
+
+            var bucket = GetBucket(dto.BucketID);
+            var quoteSubAccount = GetSubAccount(bucket.QuoteSubAccountID);
+            var duplicateAccountInd = quoteSubAccount.DuplicateAccountInd;
+
+            if (!duplicateAccountInd.HasValue)
+            {
+                var quoteInterestCalculationGroup = GetInterestGroup(quoteSubAccount.QuoteInterestCalculationGroupID);
+                duplicateAccountInd = quoteInterestCalculationGroup.DuplicateAccountInd;
+            }
+
+            if (!duplicateAccountInd.HasValue || !duplicateAccountInd.Value)
+                return false;
+
+            var sixMonthsPrior = dto.ActionDate.AddMonths(-6);
+            sixMonthsPrior = new DateTime(sixMonthsPrior.Year, sixMonthsPrior.Month, 1);
+
+            var hasPastTransactions = (from t in db.Transactions
+                                       join tt in db.TransactionTypes on t.TransactionTypeID equals tt.TransactionTypeID
+                                       where (t.AccountNumber == dto.AccountNumber || t.AccountNumber == dto.AccountNumberPadded)
+                                          && activeTransactionStatuses.Contains(t.TransactionStatusID)
+                                          && t.ActionDate >= sixMonthsPrior
+                                          && tt.ServiceID == (int)ServiceEnum.Payments
+                                          && t.EntityID == dto.EntityID
+                                       select t).Any();
+
+            return hasPastTransactions;
+        }
+
+        [Cache(CacheType = CacheType.Disk)]
+        public virtual IEnumerable<LookupTransactionDto> GetTransactionsByBucket(int bucketID)
+        {
+            var _unitOfWork = Locator.Get<IUnitOfWork<DBOEntities>>();
+            return _unitOfWork.Query<LookupTransactionDto>("SELECT TransactionTypeID, TransactionSubTypeID, TransactionStatusID, BucketID, Amount FROM [dbo].[Transaction] WITH (NOLOCK) WHERE BucketID = @BucketID AND TransactionStatusID IN(1,2,3,8,13,20)", param: new { BucketID = bucketID }, commandType: CommandType.Text);
+        }
+
+        private bool CheckRatios(RatiosDto dto)
+        {
+            IEnumerable<TransactionTypeSubTypeConfigurationDto> transactionTypeSubTypeConfiguration = TransactionTypeSubTypeConfigurationRepo.Value.GetTransactionTypeSubTypeConfiguration(dto.BucketID);
+
+            if (transactionTypeSubTypeConfiguration.Count() > 0)
+            {
+                int[] ProcessedStatuses = new int[] { (int)TransactionStatusEnum.Processed };
+
+                int[] PendingStatuses = new int[] {  (int)TransactionStatusEnum.Pending,
+                                                     (int)TransactionStatusEnum.Submitted,
+                                                     (int)TransactionStatusEnum.AwaitingAuthorisation,
+                                                     (int)TransactionStatusEnum.NAEDOTracking,
+                                                     (int)TransactionStatusEnum.AwaitingFinancialRelease ,
+                                                     (int)TransactionStatusEnum.Processed};
+
+                int[] CollectionTypes = new int[] { (int) TransactionTypeEnum.Collection,
+                                                    (int) TransactionTypeEnum.CollectionRejection,
+                                                    (int) TransactionTypeEnum.Deposit,
+                                                    (int) TransactionTypeEnum.DepositReversal};
+
+                double? maxPRRatio = null;
+                var config = transactionTypeSubTypeConfiguration.Where(e => e.TransactionTypeID == dto.TransactionTypeID && e.TransactionSubTypeID == dto.TransactionSubTypeID).FirstOrDefault();
+                if (config != null)
+                    maxPRRatio = config.MaxPaymentRatio;
+
+                if (maxPRRatio != null)
+                {
+                    var transactions = GetTransactionsByBucket(dto.BucketID).ToList();
+                    var transactionTypes = TransactionTypeRepository.Value.GetTransactionTypes();
+                    transactions.Add(new LookupTransactionDto { TransactionTypeID = dto.TransactionTypeID, TransactionSubTypeID = dto.TransactionSubTypeID, TransactionStatusID = dto.TransactionStatusID, BucketID = dto.BucketID, Amount = dto.Amount });
+                    var sumProcessedPayment =
+                                (from ii in
+                                     (
+                                         from trans in transactions
+                                         join ttypes in transactionTypes on trans.TransactionTypeID equals ttypes.TransactionTypeID
+                                         where ProcessedStatuses.Contains(trans.TransactionStatusID)
+                                         && trans.TransactionTypeID == dto.TransactionTypeID
+                                         && trans.TransactionSubTypeID == dto.TransactionSubTypeID
+                                         select new
+                                         {
+                                             BucketID = trans.BucketID,
+                                             Amount = ttypes.DrCrInd == "C" ? trans.Amount : trans.Amount * -1
+                                         }
+                                     )
+                                 group ii by new
+                                 { ii.BucketID }
+                                     into g
+                                 select new
+                                 {
+                                     BucketID = g.Key.BucketID,
+                                     Amount = g.Sum(x => x.Amount)
+                                 }).ToList();
+
+                    var sumPendingPayment =
+                                (from ii in
+                                     (
+                                         from trans in transactions
+                                         join ttypes in transactionTypes on trans.TransactionTypeID equals ttypes.TransactionTypeID
+                                         where PendingStatuses.Contains(trans.TransactionStatusID)
+                                         && trans.TransactionTypeID == dto.TransactionTypeID
+                                         && trans.TransactionSubTypeID == dto.TransactionSubTypeID
+                                         select new
+                                         {
+                                             BucketID = trans.BucketID,
+                                             Amount = ttypes.DrCrInd == "C" ? trans.Amount : trans.Amount * -1
+                                         }
+                                     )
+                                 group ii by new
+                                 { ii.BucketID }
+                                     into g
+                                 select new
+                                 {
+                                     BucketID = g.Key.BucketID,
+                                     Amount = g.Sum(x => x.Amount)
+                                 }).ToList();
+
+                    var sumProcessedCollections =
+                                (from ii in
+                                     (
+                                         from trans in transactions
+                                         join ttypes in transactionTypes on trans.TransactionTypeID equals ttypes.TransactionTypeID
+                                         where ProcessedStatuses.Contains(trans.TransactionStatusID)
+                                         && CollectionTypes.Contains(trans.TransactionTypeID)
+                                         select new
+                                         {
+                                             BucketID = trans.BucketID,
+                                             Amount = ttypes.DrCrInd == "C" ? trans.Amount : trans.Amount * -1
+                                         }
+                                     )
+                                 group ii by new
+                                 { ii.BucketID }
+                                     into g
+                                 select new
+                                 {
+                                     BucketID = g.Key.BucketID,
+                                     Amount = g.Sum(x => x.Amount)
+                                 }).ToList();
+
+                    var sumPendingCollections =
+                                (from ii in
+                                     (
+                                         from trans in transactions
+                                         join ttypes in transactionTypes on trans.TransactionTypeID equals ttypes.TransactionTypeID
+                                         where PendingStatuses.Contains(trans.TransactionStatusID)
+                                         && CollectionTypes.Contains(trans.TransactionTypeID)
+                                         select new
+                                         {
+                                             BucketID = trans.BucketID,
+                                             Amount = ttypes.DrCrInd == "C" ? trans.Amount : trans.Amount * -1
+                                         }
+                                     )
+                                 group ii by new
+                                 { ii.BucketID }
+                                     into g
+                                 select new
+                                 {
+                                     BucketID = g.Key.BucketID,
+                                     Amount = g.Sum(x => x.Amount)
+                                 }).ToList();
+
+
+                    double processedPayment = 0;
+                    double processedCollections = 0;
+                    double pendingPayment = 0;
+                    double pendingCollections = 0;
+
+                    if (sumProcessedPayment.Count > 0)
+                        processedPayment = sumProcessedPayment.First().Amount * -1;
+                    if (sumProcessedCollections.Count > 0)
+                        processedCollections = sumProcessedCollections.First().Amount;
+                    if (sumPendingPayment.Count > 0)
+                        pendingPayment = sumPendingPayment.First().Amount * -1;
+                    if (sumPendingCollections.Count > 0)
+                        pendingCollections = sumPendingCollections.First().Amount;
+
+                    if (processedCollections == 0)
+                        dto.AggregateProcessedRatio = 0;
+                    else
+                        dto.AggregateProcessedRatio = (processedPayment / processedCollections) * 100;
+
+                    if (pendingCollections == 0)
+                        dto.AggregateExpectedRatio = 0;
+                    else
+                        dto.AggregateExpectedRatio = (pendingPayment / pendingCollections) * 100;
+
+                    if (processedCollections == 0)
+                        dto.ItemProcessedRatio = 0;
+                    else
+                        dto.ItemProcessedRatio = (dto.Amount / processedCollections) * 100;
+
+                    if (pendingCollections == 0)
+                        dto.ItemExpectedRatio = 0;
+                    else
+                        dto.ItemExpectedRatio = (dto.Amount / pendingCollections) * 100;
+
+
+                    if (dto.AggregateProcessedRatio > maxPRRatio || dto.AggregateExpectedRatio > maxPRRatio)
+                        return true;
+
+                    return false;
+                }
+            }
+
+            return false;
+        }
+
+        public virtual RatiosDto IsMaxPaymentRatioExceeded(double aggregateExpectedRatio, double aggregateProcessedRatio, double itemExpectedRatio, double itemProcessedRatio, int transactionSubTypeID, int transactionTypeID, int transactionStatusID, double amount, int bucketID)
+        {
+            RatiosDto ratios = new RatiosDto()
+            {
+                AggregateExpectedRatio = aggregateExpectedRatio,
+                AggregateProcessedRatio = aggregateProcessedRatio,
+                Amount = amount,
+                BucketID = bucketID,
+                ItemExpectedRatio = itemExpectedRatio,
+                ItemProcessedRatio = itemProcessedRatio,
+                TransactionSubTypeID = transactionSubTypeID,
+                TransactionTypeID = transactionTypeID,
+                TransactionStatusID = transactionStatusID
+            };
+
+            //Run ratio calcs and return with returnVal
+            bool returnVal = CheckRatios(ratios);
+            ratios.IsMaxPaymentRatioExceeded = returnVal;
+
+            return ratios;
+        }
+
+
+        public bool NegativeBalanceAllowedRule(TransactionDto dto)
+        {
+            Bucket bucket = GetBucket(dto.BucketID);
+            QuoteSubAccount quoteSubAccount = GetSubAccount(bucket.QuoteSubAccountID);
+
+            bool? NegativeBalanceInd = null;
+            double? ToleranceRatio = null;
+            double? ToleranceAmount = null;
+
+            var currentScreenKey = HttpHeaderUtility.Value.GetHeaderValue<string>(HttpHeaderKeys.ScreenKey);
+            if (AppSettingsUtility.IsService() || currentScreenKey == ScreenItemEnum.PAYNOMINATEDPAYMENTPARTIES)
+                return false;
+
+            GetToleranceSetup(dto.BucketID, ref NegativeBalanceInd, ref ToleranceRatio, ref ToleranceAmount);
+            if (NegativeBalanceInd != null && NegativeBalanceInd.Value != false)
+            {
+                bool negativeActualBalance = IsNegativeBalanceAllowed(dto, dto.Amount, ToleranceAmount, ToleranceRatio); //on Actual balance
+                if (negativeActualBalance)
+                    return true;
+
+                return IsNegativeBalanceAllowed(dto, dto.Amount, ToleranceAmount, ToleranceRatio, true);//On expected balance
+            }
+
+            return false;
+        }
+
+        public bool NegativeBalanceNotAllowedRule(TransactionDto dto)
+        {
+            bool? NegativeBalanceInd = null;
+            double? ToleranceRatio = null;
+            double? ToleranceAmount = null;
+
+            var currentScreenKey = HttpHeaderUtility.Value.GetHeaderValue<string>(HttpHeaderKeys.ScreenKey);
+            if (AppSettingsUtility.IsService() || currentScreenKey == ScreenItemEnum.PAYNOMINATEDPAYMENTPARTIES)
+                return false;
+
+            GetToleranceSetup(dto.BucketID, ref NegativeBalanceInd, ref ToleranceRatio, ref ToleranceAmount);
+            if (NegativeBalanceInd != null && NegativeBalanceInd.Value != false)
+            {
+                bool negativeActualBalance = IsNegativeBalanceNotAllowed(dto, dto.Amount, ToleranceAmount, ToleranceRatio); //on Actual balance
+                if (negativeActualBalance)
+                    return true;
+
+                return IsNegativeBalanceNotAllowed(dto, dto.Amount, ToleranceAmount, ToleranceRatio, true);//On expected balance
+            }
+
+            return false;
+        }
+
+        public List<TransactionDto> NegativeBalanceRule(List<TransactionDto> transactions)
+        {
+            bool? NegativeBalanceInd = null;
+            double? ToleranceRatio = null;
+            double? ToleranceAmount = null;
+            double totalAmount = transactions.Sum(x => x.Amount);
+
+            if (transactions.Count > 0)
+            {
+                TransactionDto dto = transactions.FirstOrDefault();
+                GetToleranceSetup(dto.BucketID, ref NegativeBalanceInd, ref ToleranceRatio, ref ToleranceAmount);
+                if (NegativeBalanceInd != null && NegativeBalanceInd.Value != false)
+                {
+                    var tempTransactions = GetTransactionsWithNegBalanceExceptions(transactions, dto, totalAmount, ToleranceAmount, ToleranceRatio);
+                    bool negativeActualBalance = tempTransactions.FirstOrDefault().Exceptions.Any(
+                        x => x.ExceptionMessageID == (int)ExceptionMessageEnum.NegativeBalancewithinallowedlimits ||
+                        x.ExceptionMessageID == (int)ExceptionMessageEnum.NegativeBalancenotwithinallowedlimits);
+
+                    if (!negativeActualBalance)
+                        tempTransactions = GetTransactionsWithNegBalanceExceptions(transactions, dto, totalAmount, ToleranceAmount, ToleranceRatio, true);
+                    return tempTransactions;
+                }
+            }
+
+            return transactions;
+        }
+
+        private bool IsNegativeBalanceAllowed(TransactionDto dto, double amount, double? ToleranceAmount, double? ToleranceRatio, bool isExpectedBalance = false)
+        {
+            var bucketTotal = BucketTotals(dto.BucketID);
+            double balanceAmount = isExpectedBalance ? bucketTotal.ExpectedBalance : bucketTotal.ActualBalances;
+            double newBalance = balanceAmount - amount;
+
+            newBalance = Math.Round(newBalance, 2, MidpointRounding.AwayFromZero);
+            if (newBalance < 0)
+            {
+                newBalance = newBalance * -1;
+                double toleranceAmount = GetToleranceAmount(dto, ToleranceAmount, ToleranceRatio);
+
+                toleranceAmount = Math.Round(toleranceAmount, 2, MidpointRounding.AwayFromZero);
+                if (toleranceAmount != -1)
+                    if (newBalance <= toleranceAmount)
+                        return true;
+            }
+
+            return false;
+        }
+
+        private List<TransactionDto> GetTransactionsWithNegBalanceExceptions(List<TransactionDto> transactions, TransactionDto dto, double totalAmount, double? ToleranceAmount, double? ToleranceRatio, bool isExpectedBalance = false)
+        {
+            if (IsNegativeBalanceAllowed(dto, totalAmount, ToleranceAmount, ToleranceRatio, isExpectedBalance))
+            {
+                foreach (var trans in transactions)
+                {
+                    ExceptionUtility.SetException((ITransactionException)trans, ExceptionMessageEnum.NegativeBalancewithinallowedlimits);
+                    trans.IsInValid = true;
+                }
+            }
+            else if (IsNegativeBalanceNotAllowed(dto, totalAmount, ToleranceAmount, ToleranceRatio, isExpectedBalance))
+            {
+                foreach (var trans in transactions)
+                {
+                    ExceptionUtility.SetException((ITransactionException)trans, ExceptionMessageEnum.NegativeBalancenotwithinallowedlimits);
+                    trans.IsInValid = true;
+                }
+            }
+
+            return transactions;
+        }
+
+        private bool IsNegativeBalanceNotAllowed(TransactionDto dto, double amount, double? ToleranceAmount, double? ToleranceRatio, bool isExpectedBalance = false)
+        {
+            var bucketTotal = BucketTotals(dto.BucketID);
+            double balanceAmount = isExpectedBalance ? bucketTotal.ExpectedBalance : bucketTotal.ActualBalances;
+            double newBalance = balanceAmount - amount;
+            newBalance = Math.Round(newBalance, 2, MidpointRounding.AwayFromZero);
+            if (newBalance < 0)
+            {
+                newBalance = newBalance * -1;
+                double toleranceAmount = GetToleranceAmount(dto, ToleranceAmount, ToleranceRatio);
+
+                toleranceAmount = Math.Round(toleranceAmount, 2, MidpointRounding.AwayFromZero);
+                if (toleranceAmount != -1)
+                    if (newBalance > toleranceAmount)
+                        return true;
+            }
+
+            return false;
+        }
+
+        [Cache]
+        public virtual double GetCurrentBalance(int bucketID)
+        {
+            var db = Locator.DBContext;
+            var currentBalance =
+                (from ii in
+                     (
+                         from trans in db.Transactions
+                         join ttypes in db.TransactionTypes on trans.TransactionTypeID equals ttypes.TransactionTypeID
+                         where trans.BucketID == bucketID
+                               && trans.TransactionStatusID == (int)TransactionStatusEnum.Processed
+                         select new
+                         {
+                             BucketID = trans.BucketID,
+                             Amount = ttypes.DrCrInd == "C" ? trans.Amount : trans.Amount * -1
+                         }
+                     )
+                 group ii by new
+                 { ii.BucketID }
+                 into g
+                 select new
+                 {
+                     BucketID = g.Key.BucketID,
+                     Amount = g.Sum(x => x.Amount)
+                 }).FromCache();
+
+            double currentBalanceAmount = 0;
+            if (currentBalance.Count > 0)
+                currentBalanceAmount = currentBalance.First().Amount;
+
+            return currentBalanceAmount;
+        }
+
+        public void GetToleranceSetup(int bucketID, ref bool? NegativeBalanceInd, ref double? ToleranceRatio, ref double? ToleranceAmount)
+        {
+            Bucket bucket = GetBucket(bucketID);
+            QuoteSubAccount quoteSubAccount = GetSubAccount(bucket.QuoteSubAccountID);
+
+            if (quoteSubAccount.NegativeBalanceInd.GetValueOrDefault())
+            {
+                NegativeBalanceInd = quoteSubAccount.NegativeBalanceInd.Value;
+
+                if (quoteSubAccount.ToleranceRatio.GetValueOrDefault() != default(double))
+                    ToleranceRatio = quoteSubAccount.ToleranceRatio.Value;
+                if (quoteSubAccount.ToleranceAmount.GetValueOrDefault() != default(double))
+                    ToleranceAmount = quoteSubAccount.ToleranceAmount.Value;
+            }
+            else
+            {
+                QuoteInterestCalculationGroup quoteInterestCalculationGroup = GetInterestGroup(quoteSubAccount.QuoteInterestCalculationGroupID);
+                if (quoteInterestCalculationGroup.NegativeBalanceInd.GetValueOrDefault())
+                    NegativeBalanceInd = quoteInterestCalculationGroup.NegativeBalanceInd.Value;
+                if (quoteInterestCalculationGroup.ToleranceRatio.GetValueOrDefault() != default(double))
+                    ToleranceRatio = quoteInterestCalculationGroup.ToleranceRatio.Value;
+                if (quoteInterestCalculationGroup.ToleranceAmount.GetValueOrDefault() != default(double))
+                    ToleranceAmount = quoteInterestCalculationGroup.ToleranceAmount.Value;
+            }
+        }
+
+        [Cache]
+        public virtual double GetToleranceAmount(TransactionDto dto, double? ToleranceAmount, double? ToleranceRatio)
+        {
+            var db = Locator.DBContext;
+            double toleranceAmount = -1;
+
+            if (ToleranceAmount.GetValueOrDefault() != default(double))
+                toleranceAmount = ToleranceAmount.Value;
+            else
+            {
+                if (ToleranceRatio.GetValueOrDefault() != default(double))
+                {
+                    int[] CollectionTypes = new int[] { 1, 12, 14, 16 };
+
+                    var sumProcessedCollections =
+                        (from ii in
+                             (
+                                 from trans in db.Transactions
+                                 join ttypes in db.TransactionTypes on trans.TransactionTypeID equals ttypes.TransactionTypeID
+                                 where trans.BucketID == dto.BucketID
+                                 && trans.TransactionStatusID == (int)TransactionStatusEnum.Processed
+                                 && CollectionTypes.Contains(trans.TransactionTypeID)
+                                 select new
+                                 {
+                                     BucketID = trans.BucketID,
+                                     Amount = ttypes.DrCrInd == "C" ? trans.Amount : trans.Amount * -1
+                                 }
+                             )
+                         group ii by new
+                         { ii.BucketID }
+                             into g
+                         select new
+                         {
+                             BucketID = g.Key.BucketID,
+                             Amount = g.Sum(x => x.Amount)
+                         }).FromCache();
+
+                    double processedCollectionAmount = 0;
+                    if (sumProcessedCollections.Count > 0)
+                        processedCollectionAmount = sumProcessedCollections.First().Amount;
+
+                    toleranceAmount = (processedCollectionAmount * ToleranceRatio.Value) / 100;
+                }
+            }
+
+            return toleranceAmount;
+        }
+
+        public BucketBalanceTotals BucketTotals(IEnumerable<BucketTotalDto> bucketTotals)
+        {
+            //Totals
+            var total = new BucketBalanceTotals();
+            total.PendingBalance = bucketTotals.Where(x => x.ServiceGroupID == (int)ServiceGroupEnum.DebitOrdersCollected ||
+                                                           x.ServiceGroupID == (int)ServiceGroupEnum.NAEDODebitOrdersCollected ||
+                                                           x.ServiceGroupID == (int)ServiceGroupEnum.Deposits ||
+                                                           x.ServiceGroupID == (int)ServiceGroupEnum.TotalPayments ||
+                                                           x.ServiceGroupID == (int)ServiceGroupEnum.Journals)
+                                               .SelectMany(z => z.SubBalances)
+                                               .Where(k => k.ServiceTransactionStatusID == (int)ServiceTransactionStatusEnum.PendingDebitOrders ||
+                                                           k.ServiceTransactionStatusID == (int)ServiceTransactionStatusEnum.PendingDeposits ||
+                                                           k.ServiceTransactionStatusID == (int)ServiceTransactionStatusEnum.PendingDepositsReversals ||
+                                                           k.ServiceTransactionStatusID == (int)ServiceTransactionStatusEnum.PendingExternalCollectionRejections ||
+                                                           k.ServiceTransactionStatusID == (int)ServiceTransactionStatusEnum.PendingNAEDODebitOrders ||
+                                                           k.ServiceTransactionStatusID == (int)ServiceTransactionStatusEnum.PendingPayments ||
+                                                           k.ServiceTransactionStatusID == (int)ServiceTransactionStatusEnum.PendingExternalPaymentRejections ||
+                                                           k.ServiceTransactionStatusID == (int)ServiceTransactionStatusEnum.PendingJournals)
+                                               .Sum(x => x.TotalAmount);
+
+            total.ActualBalances = bucketTotals.Where(x => x.ServiceGroupID == (int)ServiceGroupEnum.DebitOrdersCollected ||
+                                                           x.ServiceGroupID == (int)ServiceGroupEnum.NAEDODebitOrdersCollected ||
+                                                           x.ServiceGroupID == (int)ServiceGroupEnum.Deposits ||
+                                                           x.ServiceGroupID == (int)ServiceGroupEnum.TotalPayments ||
+                                                           x.ServiceGroupID == (int)ServiceGroupEnum.Journals)
+                                               .SelectMany(x => x.SubBalances)
+                                               .Where(x => x.ServiceTransactionStatusID == (int)ServiceTransactionStatusEnum.ProcessedDebitOrders ||
+                                                           x.ServiceTransactionStatusID == (int)ServiceTransactionStatusEnum.ProcessedExternalCollectionRejections ||
+                                                           x.ServiceTransactionStatusID == (int)ServiceTransactionStatusEnum.ProcessedNAEDODebitOrders ||
+                                                           x.ServiceTransactionStatusID == (int)ServiceTransactionStatusEnum.ExternalNAEDORejections ||
+                                                           x.ServiceTransactionStatusID == (int)ServiceTransactionStatusEnum.ProcessedDeposits ||
+                                                           x.ServiceTransactionStatusID == (int)ServiceTransactionStatusEnum.ProcessedDepositsReversals ||
+                                                           x.ServiceTransactionStatusID == (int)ServiceTransactionStatusEnum.ProcessedExternalPaymentRejections ||
+                                                           x.ServiceTransactionStatusID == (int)ServiceTransactionStatusEnum.SuccessfulPayments ||
+                                                           x.ServiceTransactionStatusID == (int)ServiceTransactionStatusEnum.ProcessedJournals)
+                                               .Sum(x => x.TotalAmount);
+
+            total.ExpectedBalance = total.PendingBalance + total.ActualBalances;
+
+            return total;
+        }
+
+        public BucketBalanceTotals BucketTotals(int bucketID)
+        {
+            //Totals
+            var total = new BucketBalanceTotals();
+            var bucketTotals = bucketTotalRepo.Value.GetBucketTotals(bucketID);
+            total.PendingBalance = bucketTotals.Where(x => x.ServiceGroupID == (int)ServiceGroupEnum.DebitOrdersCollected ||
+                                                           x.ServiceGroupID == (int)ServiceGroupEnum.NAEDODebitOrdersCollected ||
+                                                           x.ServiceGroupID == (int)ServiceGroupEnum.Deposits ||
+                                                           x.ServiceGroupID == (int)ServiceGroupEnum.TotalPayments ||
+                                                           x.ServiceGroupID == (int)ServiceGroupEnum.Journals ||
+                                                           x.ServiceGroupID == (int)ServiceGroupEnum.Adjustments)
+                                               .SelectMany(z => z.SubBalances)
+                                               .Where(k => k.ServiceTransactionStatusID == (int)ServiceTransactionStatusEnum.PendingDebitOrders ||
+                                                           k.ServiceTransactionStatusID == (int)ServiceTransactionStatusEnum.PendingDeposits ||
+                                                           k.ServiceTransactionStatusID == (int)ServiceTransactionStatusEnum.PendingDepositsReversals ||
+                                                           k.ServiceTransactionStatusID == (int)ServiceTransactionStatusEnum.PendingExternalCollectionRejections ||
+                                                           k.ServiceTransactionStatusID == (int)ServiceTransactionStatusEnum.PendingNAEDODebitOrders ||
+                                                           k.ServiceTransactionStatusID == (int)ServiceTransactionStatusEnum.PendingPayments ||
+                                                           k.ServiceTransactionStatusID == (int)ServiceTransactionStatusEnum.PendingExternalPaymentRejections ||
+                                                           k.ServiceTransactionStatusID == (int)ServiceTransactionStatusEnum.PendingJournals)
+                                               .Sum(x => x.TotalAmount);
+
+            total.ActualBalances = bucketTotals.Where(x => x.ServiceGroupID == (int)ServiceGroupEnum.DebitOrdersCollected ||
+                                                           x.ServiceGroupID == (int)ServiceGroupEnum.NAEDODebitOrdersCollected ||
+                                                           x.ServiceGroupID == (int)ServiceGroupEnum.Deposits ||
+                                                           x.ServiceGroupID == (int)ServiceGroupEnum.TotalPayments ||
+                                                           x.ServiceGroupID == (int)ServiceGroupEnum.Journals ||
+                                                           x.ServiceGroupID == (int)ServiceGroupEnum.Adjustments)
+                                               .SelectMany(x => x.SubBalances)
+                                               .Where(x => x.ServiceTransactionStatusID == (int)ServiceTransactionStatusEnum.ProcessedDebitOrders ||
+                                                           x.ServiceTransactionStatusID == (int)ServiceTransactionStatusEnum.ProcessedExternalCollectionRejections ||
+                                                           x.ServiceTransactionStatusID == (int)ServiceTransactionStatusEnum.ProcessedNAEDODebitOrders ||
+                                                           x.ServiceTransactionStatusID == (int)ServiceTransactionStatusEnum.ExternalNAEDORejections ||
+                                                           x.ServiceTransactionStatusID == (int)ServiceTransactionStatusEnum.ProcessedDeposits ||
+                                                           x.ServiceTransactionStatusID == (int)ServiceTransactionStatusEnum.ProcessedDepositsReversals ||
+                                                           x.ServiceTransactionStatusID == (int)ServiceTransactionStatusEnum.ProcessedExternalPaymentRejections ||
+                                                           x.ServiceTransactionStatusID == (int)ServiceTransactionStatusEnum.SuccessfulPayments ||
+                                                           x.ServiceTransactionStatusID == (int)ServiceTransactionStatusEnum.ProcessedJournals ||
+                                                           x.ServiceTransactionStatusID == (int)ServiceTransactionStatusEnum.ProcessedAdjustments)
+                                               .Sum(x => x.TotalAmount);
+
+            total.PendingBalance = Math.Round(total.PendingBalance, 2);
+            total.ActualBalances = Math.Round(total.ActualBalances, 2);
+            total.ExpectedBalance = total.PendingBalance + total.ActualBalances;
+
+            return total;
+        }
+
+        public TransactionDetail LoadTransactionDetails(int transactionID)
+        {
+            var db = Locator.DBContext;
+            TransactionDetail dto = new TransactionDetail();
+            string transactionIDstring = transactionID.ToString();
+            var transactionStatuses = db.TransactionStatus.ToList();
+
+            //#1 - TRANSACTION
+            var foundTransaction = db.Transactions.FirstOrDefault(x => x.TransactionID == transactionID);
+            if (foundTransaction == null)
+                throw new Exception("Transaction can't be found for Transaction Detail");
+            else
+            {
+                //Totals
+                var bucketTotals = bucketTotalRepo.Value.GetBucketTotals(foundTransaction.BucketID);
+                var pendingBalance = bucketTotals.Where(x => x.ServiceGroupID == (int)ServiceGroupEnum.DebitOrdersCollected ||
+                                                             x.ServiceGroupID == (int)ServiceGroupEnum.NAEDODebitOrdersCollected ||
+                                                             x.ServiceGroupID == (int)ServiceGroupEnum.Deposits ||
+                                                             x.ServiceGroupID == (int)ServiceGroupEnum.TotalPayments ||
+                                                             x.ServiceGroupID == (int)ServiceGroupEnum.Journals)
+                                                 .SelectMany(z => z.SubBalances)
+                                                 .Where(k => k.ServiceTransactionStatusID == (int)ServiceTransactionStatusEnum.PendingDebitOrders ||
+                                                             k.ServiceTransactionStatusID == (int)ServiceTransactionStatusEnum.PendingDeposits ||
+                                                             k.ServiceTransactionStatusID == (int)ServiceTransactionStatusEnum.PendingDepositsReversals ||
+                                                             k.ServiceTransactionStatusID == (int)ServiceTransactionStatusEnum.PendingExternalCollectionRejections ||
+                                                             k.ServiceTransactionStatusID == (int)ServiceTransactionStatusEnum.PendingNAEDODebitOrders ||
+                                                             k.ServiceTransactionStatusID == (int)ServiceTransactionStatusEnum.PendingPayments ||
+                                                             k.ServiceTransactionStatusID == (int)ServiceTransactionStatusEnum.PendingExternalPaymentRejections ||
+                                                             k.ServiceTransactionStatusID == (int)ServiceTransactionStatusEnum.PendingJournals)
+                                                 .Sum(x => x.TotalAmount);
+
+                pendingBalance = Math.Round(pendingBalance, 2);
+
+                var actualbalances = bucketTotals.Where(x => x.ServiceGroupID == (int)ServiceGroupEnum.DebitOrdersCollected ||
+                                                             x.ServiceGroupID == (int)ServiceGroupEnum.NAEDODebitOrdersCollected ||
+                                                             x.ServiceGroupID == (int)ServiceGroupEnum.Deposits ||
+                                                             x.ServiceGroupID == (int)ServiceGroupEnum.TotalPayments ||
+                                                             x.ServiceGroupID == (int)ServiceGroupEnum.Journals)
+                                                 .SelectMany(x => x.SubBalances)
+                                                 .Where(x => x.ServiceTransactionStatusID == (int)ServiceTransactionStatusEnum.ProcessedDebitOrders ||
+                                                             x.ServiceTransactionStatusID == (int)ServiceTransactionStatusEnum.ProcessedExternalCollectionRejections ||
+                                                             x.ServiceTransactionStatusID == (int)ServiceTransactionStatusEnum.ProcessedNAEDODebitOrders ||
+                                                             x.ServiceTransactionStatusID == (int)ServiceTransactionStatusEnum.ExternalNAEDORejections ||
+                                                             x.ServiceTransactionStatusID == (int)ServiceTransactionStatusEnum.ProcessedDeposits ||
+                                                             x.ServiceTransactionStatusID == (int)ServiceTransactionStatusEnum.ProcessedDepositsReversals ||
+                                                             x.ServiceTransactionStatusID == (int)ServiceTransactionStatusEnum.ProcessedExternalPaymentRejections ||
+                                                             x.ServiceTransactionStatusID == (int)ServiceTransactionStatusEnum.SuccessfulPayments ||
+                                                             x.ServiceTransactionStatusID == (int)ServiceTransactionStatusEnum.ProcessedJournals)
+                                                 .Sum(x => x.TotalAmount);
+
+                actualbalances = Math.Round(actualbalances, 2);
+
+                var expectedBalance = pendingBalance + actualbalances;
+
+                //Transaction Details
+                dto.Transaction = (from t in db.Transactions
+                                   join irr in db.InternalRejectionReasons on t.InternalRejectionReasonID equals irr.InternalRejectionReasonID into optInternalReasons
+                                   from irr in optInternalReasons.DefaultIfEmpty()
+                                   join sc in db.ServiceChannels on t.ServiceChannelID equals sc.ServiceChannelID
+                                   join st in db.ServiceTypes on t.ServiceTypeID equals st.ServiceTypeID into optServiceTypes
+                                   from st in optServiceTypes.DefaultIfEmpty()
+                                   join bbc in db.BankBranchCodes on t.BranchNumber equals bbc.BranchCode into bbcG
+                                   from bankbranch in bbcG.DefaultIfEmpty()
+                                   join b in db.Banks on bankbranch.BankID equals b.BankID into bg
+                                   from bank in bg.DefaultIfEmpty()
+                                   join bat in db.BankAccountTypes on t.BankAccountTypeID equals bat.BankAccountTypeID into batg
+                                   from bat in batg.DefaultIfEmpty()
+                                   join npp in db.NominatedPaymentParties on new { t.AccountNumber, bankbranch.BankBranchCodeID } equals new { npp.AccountNumber, npp.BankBranchCodeID } into nnpg
+                                   from nom in nnpg.DefaultIfEmpty()
+                                   join ntd in db.NAEDOTrackingDays on t.NAEDOTrackingDaysID equals ntd.NAEDOTrackingDaysID into naedog
+                                   from naedo in naedog.DefaultIfEmpty()
+                                   join buck in db.Buckets on t.BucketID equals buck.BucketID
+                                   join qsa in db.QuoteSubAccounts on buck.QuoteSubAccountID equals qsa.QuoteSubAccountID
+                                   join qgr in db.QuoteInterestCalculationGroups on qsa.QuoteInterestCalculationGroupID equals qgr.QuoteInterestCalculationGroupID
+                                   join quote in db.Quotes on qgr.QuoteID equals quote.QuoteID
+                                   join agr in db.AgreementTypes on quote.AgreementTypeID equals agr.AgreementTypeID
+                                   join e in db.Entities on t.EntityID equals e.EntityID
+                                   join acbe in db.ACBErrorCodes on t.ACBErrorCodeID equals acbe.ACBErrorCodeID into optACBError
+                                   from acbe in optACBError.DefaultIfEmpty()
+                                   join acbr in db.ACBReasonCodes on t.ACBReasonCodeID equals acbr.ACBReasonCodeID into optACBReason
+                                   from acbr in optACBReason.DefaultIfEmpty()
+                                   where t.TransactionID == transactionID
+                                   select new { st = st, sc = sc, acbe = acbe, t = t, buck = buck, bank = bank, nom = nom, bat = bat, naedo = naedo, bankbranch = bankbranch, agr = agr, qgr = qgr, qsa = qsa, irr = irr, q = quote, acbr = acbr }).AsEnumerable()
+                                   .Select(x => new TransactionInformation()
+                                   {
+                                       TransactionID = x.t.TransactionID,
+                                       BucketID = x.t.BucketID,
+                                       ClientImportFileID = x.t.ClientImportFileID,
+                                       JournalID = x.t.JournalID,
+                                       QuoteDescription = x.q.Description,
+                                       AccountHolder = x.t.AccountHolder,
+                                       AccountNumber = x.t.AccountNumber,
+                                       InternalReference = x.t.Comment,
+                                       TransactionReference = x.t.TransactionReference,
+                                       Amount = x.t.Amount,
+                                       Bank = x.bank != null ? x.bank.ShortName : string.Empty,
+                                       BranchName = (x.bankbranch == null ? "" : x.bankbranch.BranchName),
+                                       BranchNumber = x.t.BranchNumber,
+                                       AccountType = (x.bat == null ? "" : x.bat.ShortDescription),
+                                       AgreementType = x.agr.ShortDescription,
+                                       InterestGroup = x.qgr.ShortName,
+                                       SubAccount = x.qsa.ShortName,
+                                       AccountDescription = x.t.AccountHolder,
+                                       ImportBatchNumber = x.t.ClientImportFileID,
+                                       NaedoTrackingDays = ((x.naedo == null) ? 0 : x.naedo.Days),
+                                       AuthorisationLevelID = x.t.AuthorisationLevelID,
+                                       TotalPCRatio = "TBD in BR",
+                                       PCRatio = "TBD in BR",
+                                       CollectionPeriod = string.Format("{0} To {1}", x.buck.StartDate.ToShortDateString(), x.buck.EndDate.ToShortDateString()),
+                                       IsNominated = x.t.IsNominatedParty == null ? "No" : x.t.IsNominatedParty == false ? "No" : "Yes",
+                                       UserCode = "",
+                                       TransactionStatusID = x.t.TransactionStatusID,
+                                       AvailableBalance = actualbalances,
+                                       PendingBalance = pendingBalance,
+                                       ExpectedBalance = expectedBalance,
+                                       TransactionSubTypeID = x.t.TransactionSubTypeID,
+                                       TransactionTypeID = x.t.TransactionTypeID,
+                                       ACBErrorDescription = x.acbe != null ? x.acbe.Description : x.acbr != null ? x.acbr.Description : string.Empty,
+                                       ACBErrorResolution = x.acbe != null ? x.acbe.Resolution : string.Empty,
+                                       ServiceChannelDescription = x.sc.ShortDescription,
+                                       ServiceTypeDescription = x.st != null ? x.st.ShortDescription : string.Empty,
+                                       InternalRejectionReason = x.irr != null ? x.irr.ShortDescription : string.Empty,
+                                       BusinessEventTaskID = x.t.BusinessEventTaskID,
+                                       NominatedPaymentPartyID = x.t.NominatedPaymentPartyID
+                                   }).FirstOrDefault();
+            }
+
+            //Nominated
+            if (dto.Transaction.NominatedPaymentPartyID.GetValueOrDefault() != 0)
+            {
+                var nominatedPaymentParty = db.NominatedPaymentParties.FirstOrDefault(x => x.NominatedPaymentPartyID == dto.Transaction.NominatedPaymentPartyID.Value);
+                dto.Transaction.NominatedDays = nominatedPaymentParty.Days;
+                dto.Transaction.NominatedDayOfMonth = nominatedPaymentParty.DayOfMonth;
+            }
+
+            //RATIOS
+            if (dto.Transaction.TransactionTypeID != (int)TransactionTypeEnum.Collection && dto.Transaction.TransactionTypeID != (int)TransactionTypeEnum.Deposit && dto.Transaction.TransactionTypeID != (int)TransactionTypeEnum.CollectionRejection)
+            {
+                //Ratios
+                RatiosDto ratios = new RatiosDto()
+                {
+                    Amount = dto.Transaction.Amount,
+                    BucketID = dto.Transaction.BucketID,
+                    TransactionSubTypeID = dto.Transaction.TransactionSubTypeID,
+                    TransactionTypeID = dto.Transaction.TransactionTypeID
+                };
+
+                //Run ratio calcs and return with returnVal
+                CheckRatios(ratios);
+
+                //Reassign ratios to DTO
+                dto.Transaction.AggregateExpectedRatio = ratios.AggregateExpectedRatio;
+                dto.Transaction.AggregateProcessedRatio = ratios.AggregateProcessedRatio;
+                dto.Transaction.ItemExpectedRatio = ratios.ItemExpectedRatio;
+                dto.Transaction.ItemProcessedRatio = ratios.ItemProcessedRatio;
+            }
+
+            if (!foundTransaction.BusinessEventTaskID.HasValue)
+            {
+                dto.TransactionAuthorisations = new List<AuthorisationHistory>();
+                dto.TransactionAudit = new List<TransactionAuditInformation>();
+                dto.TransactionAuthorisationState = new AuthorisationState();
+
+                return dto;
+            }
+
+            //Current Auth Level
+            var businessEventTask = db.BusinessEventTasks.FirstOrDefault(x => x.BusinessEventTaskID == foundTransaction.BusinessEventTaskID);
+            dto.Transaction.BusinessEventID = businessEventTask.BusinessEventID;
+
+            //#3 - TRANSACTION AUTHORISATION HISTORY ----------------------------------------------------------
+            dto.TransactionAuthorisations = (from tl in db.TransactionLogs
+                                             join uu in db.UserUsers on tl.UserID equals uu.UserID
+                                             join ecp in db.EntityContactPersons on uu.EntityContactPersonID equals ecp.EntityContactPersonID
+                                             where tl.TransactionID == transactionID && tl.BusinessEventTaskID != null
+                                             select new { tl, uu, ecp }).AsEnumerable().Select(x => new AuthorisationHistory()
+                                             {
+                                                 ActionDateTime = x.tl.LogDate,
+                                                 BusinessEventTaskID = x.tl.BusinessEventTaskID.Value,
+                                                 TransactionStatus = transactionStatuses.FirstOrDefault(ts => ts.TransactionStatusID == x.tl.TransactionStatusID).ShortDescription,
+                                                 User = new BasicUser()
+                                                 {
+                                                     UserID = x.uu.UserID,
+                                                     FirstName = x.ecp.FirstName,
+                                                     LastName = x.ecp.Surname,
+                                                 },
+                                             }).OrderBy(x => x.ActionDateTime).ThenBy(x => x.AuthorisationLevelID).ToList();
+
+            foreach (var ta in dto.TransactionAuthorisations)
+            {
+                businessEventTask = db.BusinessEventTasks.FirstOrDefault(x => x.BusinessEventTaskID == ta.BusinessEventTaskID);
+                ta.BusinessEventID = businessEventTask.BusinessEventID;
+                switch ((BusinessEventEnum)businessEventTask.BusinessEventID)
+                {
+                    case BusinessEventEnum._ApproveInternalAuthorisationLevelOne:
+                    case BusinessEventEnum._RejectInternalAuthorisationLevelOne:
+                    case BusinessEventEnum._ApproveExternalAuthorisationLevelOne:
+                    case BusinessEventEnum._RejectExternalAuthorisationLevelOne:
+                        ta.AuthorisationLevelID = 1;
+                        break;
+                    case BusinessEventEnum._ApproveInternalAuthorisationQualityControl:
+                    case BusinessEventEnum._RejectInternalAuthorisationQualityControl:
+                    case BusinessEventEnum._ApproveInternalAuthorisationLevelTwo:
+                    case BusinessEventEnum._RejectInternalAuthorisationLevelTwo:
+                    case BusinessEventEnum._ApproveExternalAuthorisationLevelTwo:
+                        ta.AuthorisationLevelID = 2;
+                        break;
+                    case BusinessEventEnum._ApproveInternalAuthorisationLevelThree:
+                    case BusinessEventEnum._RejectInternalAuthorisationLevelThree:
+                    case BusinessEventEnum._ApproveExternalAuthorisationLevelThree:
+                    case BusinessEventEnum._RejectExternalAuthorisationLevelThree:
+                        ta.AuthorisationLevelID = 3;
+                        break;
+                }
+            }
+
+            //#4 - CURRENT AUTHORISATION ----------------------------------------------------------
+            dto.TransactionAuthorisationState = new AuthorisationState();
+
+            int id = 0;
+            var classtypeID = businessEventTask.ClassTypeID;
+            if (classtypeID == (int)ClassTypeEnum.ClientImportFile)
+                id = foundTransaction.ClientImportFileID.GetValueOrDefault();
+            if (classtypeID == (int)ClassTypeEnum.Transaction)
+                id = foundTransaction.TransactionID;
+            if (classtypeID == (int)ClassTypeEnum.Journal)
+                id = foundTransaction.JournalID.GetValueOrDefault();
+
+            dto.TransactionAuthorisationState.Users = (from bet in db.BusinessEventTasks.Where(b => b.BusinessEventTaskID == (int)foundTransaction.BusinessEventTaskID)
+                                                       join be in db.BusinessEvents on bet.BusinessEventID equals be.BusinessEventID
+                                                       join betu in db.BusinessEventTaskUsers on bet.BusinessEventTaskID equals betu.BusinessEventTaskID
+                                                       join uu in db.UserUsers on betu.UserID equals uu.UserID
+                                                       join ecp in db.EntityContactPersons on uu.EntityContactPersonID equals ecp.EntityContactPersonID
+                                                       where bet.ID == id
+                                                          && bet.EndDate == null
+                                                          && (be.BusinessEventID == (int)BusinessEventEnum._ExternalAuthorisationLevelOne ||
+                                                              be.BusinessEventID == (int)BusinessEventEnum._ExternalAuthorisationLevelTwo ||
+                                                              be.BusinessEventID == (int)BusinessEventEnum._ExternalAuthorisationLevelThree ||
+                                                              be.BusinessEventID == (int)BusinessEventEnum._InternalAuthorisationLevelOne ||
+                                                              be.BusinessEventID == (int)BusinessEventEnum._InternalAuthorisationLevelTwo ||
+                                                              be.BusinessEventID == (int)BusinessEventEnum._InternalAuthorisationLevelThree ||
+                                                              be.BusinessEventID == (int)BusinessEventEnum._InternalAuthorisationQualityControl)
+                                                       select new BasicUser
+                                                       {
+                                                           UserID = uu.UserID,
+                                                           FirstName = ecp.FirstName,
+                                                           LastName = ecp.Surname,
+                                                       }).ToList();
+
+            foreach (var tas in dto.TransactionAuthorisationState.Users)
+            {
+                var userid = (dto.TransactionAuthorisations.Find(g => g.User.UserID == tas.UserID));
+                if (userid != null)
+                    dto.TransactionAuthorisations.RemoveAll(x => x.User.UserID == userid.User.UserID);
+            }
+
+            dto.TransactionAuthorisations.RemoveAll(x => x.BusinessEventID != (int)BusinessEventEnum._TransactionCreated && x.BusinessEventID != (int)BusinessEventEnum._TransactionRecalled && x.AuthorisationLevelID == 0);
+            dto.TransactionAudit = new List<TransactionAuditInformation>();
+
+            foreach (var ta in dto.TransactionAuthorisations)
+            {
+                dto.TransactionAudit.Add(new TransactionAuditInformation()
+                {
+                    User = new BasicUser()
+                    {
+                        FirstName = ta.User.FirstName,
+                        LastName = ta.User.LastName,
+                    },
+                    ActionDateTime = ta.ActionDateTime,
+                    TransactionStatus = ta.TransactionStatus + (ta.BusinessEventID == 98 ? " (Created)" : (ta.BusinessEventID == 590 ? " (Recalled)" : ""))
+                });
+            }
+
+            //Remove all where the auth level isn't set.
+            dto.TransactionAuthorisations.RemoveAll(x => x.AuthorisationLevelID == 0);
+            dto.TransactionAuthorisations = dto.TransactionAuthorisations.OrderBy(x => x.AuthorisationLevelID).ToList();
+
+            return dto;
+        }
+
+        public async Task<IEnumerable<dynamic>> GetClientTransactions(ClientTransactionSearchDto searchCriteria)
+        {
+            var _unitOfWork = Locator.Get<IUnitOfWork<DBOEntities>>();
+            var query = await _unitOfWork.QueryAsync<dynamic>(StoredProcedureNames.SearchClientTransactions, param: searchCriteria, commandType: CommandType.StoredProcedure);
+            return query;
+        }
+
+        public async Task<string> GetLinkedTransactions(int bankAccountTransactionID)
+        {
+            var criteria = new LinkedTransactionCriteria(bankAccountTransactionID);
+            JsonCreator.Value.Builder.Criteria = criteria;
+            return await GetJsonEntities();
+        }
+
+        private async Task<string> GetJsonEntities<C>(object criteria) where C : class
+        {
+            var jsonCreator = Locator.Get<IJsonCreater<C>>();
+            jsonCreator.Builder.Criteria = criteria;
+            var json = await jsonCreator.Construct();
+            return json;
+        }
+
+        [Cache]
+        public async Task<string> GetTransactionAuthLookups()
+        {
+            var sb = new StringBuilder();
+            string json = @"{{""TransactionStatuses"": {0}, ""TransactionTypes"": {1}, ""TransactionSubTypes"": {2}, ""NAEDOTrackingDays"": {3}, ""ServiceTypes"": {4}, ""ExceptionMessages"": {5} }}";
+            var transactionStatuses = await GetJsonEntities<TransactionStatu>(new GenericCriteria(StoredProcedureNames.GetTransactionStatuses));
+            var transactionTypes = await GetJsonEntities<TransactionType>(new GenericCriteria(StoredProcedureNames.GetTransactionTypes));
+            var transactionSubTypes = await GetJsonEntities<TransactionSubType>(new GenericCriteria(StoredProcedureNames.GetTransactionSubTypes));
+            var naedoTrackingDays = await GetJsonEntities<NAEDOTrackingDay>(new GenericCriteria(StoredProcedureNames.GetNAEDOTrackingDays));
+            var serviceTypes = await GetJsonEntities<ServiceType>(new GenericCriteria(StoredProcedureNames.GetServiceTypes));
+            var exceptionMessages = await GetJsonEntities<ExceptionMessage>(new GenericCriteria(StoredProcedureNames.GetExceptionMessages));
+            sb.AppendFormat(json, transactionStatuses, transactionTypes, transactionSubTypes, naedoTrackingDays, serviceTypes, exceptionMessages);
+
+            return sb.ToString();
+        }
+
+        public bool IsUnNominatedNonPremiumPayment(TransactionDto dto)
+        {
+            var db = Locator.DBContext;
+            string accountNumber = dto.AccountNumberPadded;
+            List<string> nominatedPremiums = new List<string>();
+
+            if (UserUtility.IsInternalUser() || dto.TransactionTypeID == (int)TransactionTypeEnum.Premium)
+                return false;
+
+            using (var _unitOfWork = Locator.Get<IUnitOfWork<DBOEntities>>())
+            {
+                var nominatedPaymentParty = _unitOfWork.Query<int?>(StoredProcedureNames.MustBeNominatedParty, param: new { EntityID = dto.EntityID, AccountNumber = accountNumber, TransactionTypeID = dto.TransactionTypeID, TransactionSubTypeID = dto.TransactionSubTypeID }, commandType: CommandType.StoredProcedure).FirstOrDefault();
+                if (nominatedPaymentParty.HasValue)
+                    return false;
+
+                nominatedPremiums = _unitOfWork.Query<string>(StoredProcedureNames.GetNominatedAccountNumbersForPremiums, commandType: CommandType.StoredProcedure).ToList();
+            };
+
+            if (nominatedPremiums.Any())
+                return nominatedPremiums.Exists(x => x == accountNumber);
+
+            return false;
+        }
+
+        public bool CheckIsFintegrateTransaction(int quoteInterestCalculationGroupID)
+        {
+            var db = Locator.DBContext;
+
+            var isFintegrateTransactionQuery = from qicg in db.QuoteInterestCalculationGroups
+                                               join ba in db.BankAccounts on qicg.BankAccountID equals ba.BankAccountID
+                                               join acbu in db.ACBUsers on ba.ACBUserID equals acbu.ACBUserID
+                                               join acbuec in db.ACBUserEntryClasses on acbu.ACBUserID equals acbuec.ACBUserID
+                                               join acbec in db.ACBEntryClasses on acbuec.ACBEntryClassID equals acbec.ACBEntryClassID
+                                               where acbec.ServiceID == (int)ServiceEnum.Payments
+                                                  && acbec.EntryClassCode == "99"
+                                                  && qicg.QuoteInterestCalculationGroupID == quoteInterestCalculationGroupID
+                                               select acbec;
+
+            return isFintegrateTransactionQuery.Any();
+        }
+
+        public bool IsRejectedPastActionDatePaymentTicked(TransactionDto dto)
+        {
+            var ctx = Locator.DBContext;
+            ctx.Configuration.ProxyCreationEnabled = true;
+            var isRejected = (from qsa in ctx.QuoteSubAccounts
+                              join qig in ctx.QuoteInterestCalculationGroups on qsa.QuoteInterestCalculationGroupID equals qig.QuoteInterestCalculationGroupID
+                              join b in ctx.Buckets on qsa.QuoteSubAccountID equals b.QuoteSubAccountID
+                              where b.BucketID == dto.BucketID
+                              select qsa.RejectPastActionDatePayments ?? qig.RejectPastActionDatePayments)
+                .FromCache(ctx, "QuoteInterestCalculationGroupRepository.IsRejectedPastActionDatePaymentTicked_{0}".Fmt(dto.BucketID))
+                .FirstOrDefault();
+
+            return isRejected.HasValue ? isRejected.Value : false;
+        }
+
+        public bool IsRejectedPastActionDateCollectionTicked(TransactionDto dto)
+        {
+            var ctx = Locator.DBContext;
+            var isRejected = (from qsa in ctx.QuoteSubAccounts
+                              join qig in ctx.QuoteInterestCalculationGroups on qsa.QuoteInterestCalculationGroupID equals qig.QuoteInterestCalculationGroupID
+                              join b in ctx.Buckets on qsa.QuoteSubAccountID equals b.QuoteSubAccountID
+                              where b.BucketID == dto.BucketID
+                              select qsa.RejectPastActionDateCollection ?? qig.RejectPastActionDateCollection)
+                .FromCache(ctx, "QuoteInterestCalculationGroupRepository.IsRejectedPastActionDateCollectionTicked_{0}".Fmt(dto.BucketID))
+                .FirstOrDefault();
+
+            return isRejected.HasValue ? isRejected.Value : false;
+        }
+
+        #region Business Dashboard Methods
+
+        private class TransactionsSummaryTask
+        {
+            public int EntityID { get; set; }
+            public int ServiceChannelID { get; set; }
+            public int TransactionID { get; set; }
+            public double Amount { get; set; }
+            public DateTime ActionDate { get; set; }
+            public int TransactionStatusID { get; set; }
+            public int? BusinessEventTaskID { get; set; }
+        }
+
+        public TransactionDashboard GetDashboardReport(DateTime? actionDate = null)
+        {
+            actionDate = actionDate.HasValue ? actionDate.Value : DateTime.Today;
+
+            var result = new TransactionDashboard();
+            var startDate = DateTime.Parse("2015/01/01");
+
+            int? entityID = null;
+            if (Thread.CurrentPrincipal.GetUser().EntityID != 1)
+                entityID = Thread.CurrentPrincipal.GetUser().EntityID;
+
+            //Outstanding Tasks
+            var unitOfWorkOT = Locator.Get<IUnitOfWork<DBOEntities>>("SubUnitOfWork");
+            Task<List<BusinessEventTaskDto>> OT = Task.Run(async () =>
+            {
+                return await unitOfWorkOT.InvokeAsync(db =>
+                {
+                    return (from BET in db.BusinessEventTasks
+                            join BETU in db.BusinessEventTaskUsers on BET.BusinessEventTaskID equals BETU.BusinessEventTaskID
+                            join UU in db.UserUsers on BETU.UserID equals UU.UserID
+                            join ECP in db.EntityContactPersons on UU.EntityContactPersonID equals ECP.EntityContactPersonID
+                            join E in db.Entities on BET.EntityID equals E.EntityID
+                            where BET.DueDate <= actionDate
+                              && !BET.EndDate.HasValue
+                              && BET.HasMessageBeenFormatted
+                              && (BET.ClassTypeID == (int)ClassTypeEnum.Transaction ||
+                                  BET.ClassTypeID == (int)ClassTypeEnum.ClientImportFile ||
+                                  BET.ClassTypeID == (int)ClassTypeEnum.Journal)
+                              && (!entityID.HasValue ||
+                                  BET.EntityID == entityID.Value)
+                            select new BusinessEventTaskDto
+                            {
+                                StartDate = BET.StartDate,
+                                DueDate = BET.DueDate,
+                                TaskMessage = BET.TaskMessage,
+                                EntityName = E.EntityName,
+                                Firstname = ECP.FirstName,
+                                Lastname = ECP.Surname,
+                                BusinessEventTaskID = BET.BusinessEventTaskID,
+                                ID = BET.ID,
+                                BusinessEventID = BET.BusinessEventID,
+                                UserID = BETU.UserID
+                            }).ToListAsync();
+                });
+            });
+
+            //Outstanding Tasks Future
+            var unitOfWorkOTF = Locator.Get<IUnitOfWork<DBOEntities>>("SubUnitOfWork");
+            Task<List<BusinessEventTaskDto>> OTF = Task.Run(async () =>
+            {
+                return await unitOfWorkOTF.InvokeAsync(db =>
+                {
+                    return (from BET in db.BusinessEventTasks
+                            join BETU in db.BusinessEventTaskUsers on BET.BusinessEventTaskID equals BETU.BusinessEventTaskID
+                            join UU in db.UserUsers on BETU.UserID equals UU.UserID
+                            join ECP in db.EntityContactPersons on UU.EntityContactPersonID equals ECP.EntityContactPersonID
+                            join E in db.Entities on BET.EntityID equals E.EntityID
+                            where BET.DueDate > actionDate
+                               && !BET.EndDate.HasValue
+                               && BET.HasMessageBeenFormatted
+                               && (BET.ClassTypeID == (int)ClassTypeEnum.Transaction ||
+                                   BET.ClassTypeID == (int)ClassTypeEnum.ClientImportFile ||
+                                   BET.ClassTypeID == (int)ClassTypeEnum.Journal)
+                              && (!entityID.HasValue ||
+                                  BET.EntityID == entityID.Value)
+                            select new BusinessEventTaskDto
+                            {
+                                StartDate = BET.StartDate,
+                                DueDate = BET.DueDate,
+                                TaskMessage = BET.TaskMessage,
+                                EntityName = E.EntityName,
+                                Firstname = ECP.FirstName,
+                                Lastname = ECP.Surname,
+                                BusinessEventTaskID = BET.BusinessEventTaskID,
+                                ID = BET.ID,
+                                BusinessEventID = BET.BusinessEventID,
+                                UserID = BETU.UserID
+                            }).ToListAsync();
+                });
+            });
+
+            //Awaiting Authorisation Outstanding Tasks
+            var unitOfWorkAAOT = Locator.Get<IUnitOfWork<DBOEntities>>("SubUnitOfWork");
+            Task<List<TransactionsSummaryTask>> AAOT = Task.Run(async () =>
+            {
+                return await unitOfWorkAAOT.InvokeAsync(db =>
+                {
+                    return (from BET in db.BusinessEventTasks
+                            join T in db.Transactions on BET.BusinessEventTaskID equals T.BusinessEventTaskID
+                            where BET.DueDate <= DateTime.Today
+                               && !BET.EndDate.HasValue
+                               && BET.HasMessageBeenFormatted
+                               && (BET.ClassTypeID == (int)ClassTypeEnum.Transaction ||
+                                   BET.ClassTypeID == (int)ClassTypeEnum.ClientImportFile ||
+                                   BET.ClassTypeID == (int)ClassTypeEnum.Journal)
+                               && (!entityID.HasValue ||
+                                   BET.EntityID == entityID.Value)
+                               && T.ActionDate <= actionDate
+                               && T.TransactionStatusID == (int)TransactionStatusEnum.AwaitingAuthorisation
+                               && (T.ServiceChannelID == (int)ServiceChannelEnum.FNBOnline ||
+                                   T.ServiceChannelID == (int)ServiceChannelEnum.FNBPACS ||
+                                   T.ServiceChannelID == (int)ServiceChannelEnum.FNBFintegrate)
+                            select new TransactionsSummaryTask
+                            {
+                                EntityID = T.EntityID,
+                                ServiceChannelID = T.ServiceChannelID,
+                                TransactionID = T.TransactionID,
+                                Amount = T.Amount,
+                                ActionDate = T.ActionDate,
+                                TransactionStatusID = T.TransactionStatusID,
+                                BusinessEventTaskID = T.BusinessEventTaskID
+                            }).ToListAsync();
+                });
+            });
+
+            //Pending Transactions
+            var unitOfWorkPT = Locator.Get<IUnitOfWork<DBOEntities>>("SubUnitOfWork");
+            Task<List<TransactionsSummaryTask>> PT = Task.Run(async () =>
+            {
+                return await unitOfWorkPT.InvokeAsync(db =>
+                {
+                    return (from T in db.Transactions
+                            where T.TransactionStatusID == (int)TransactionStatusEnum.Pending
+                               && T.ActionDate >= startDate
+                               && T.ActionDate <= actionDate
+                               && (!entityID.HasValue ||
+                                   T.EntityID == entityID.Value)
+                               && (T.ServiceChannelID == (int)ServiceChannelEnum.FNBOnline ||
+                                   T.ServiceChannelID == (int)ServiceChannelEnum.FNBPACS ||
+                                   T.ServiceChannelID == (int)ServiceChannelEnum.FNBFintegrate)
+                            select new TransactionsSummaryTask
+                            {
+                                EntityID = T.EntityID,
+                                ServiceChannelID = T.ServiceChannelID,
+                                TransactionID = T.TransactionID,
+                                Amount = T.Amount,
+                                ActionDate = T.ActionDate,
+                                TransactionStatusID = T.TransactionStatusID
+                            }).ToListAsync();
+                });
+            });
+
+            //Awaiting Authorisation Transactions
+            var unitOfWorkAAT = Locator.Get<IUnitOfWork<DBOEntities>>("SubUnitOfWork");
+            Task<List<TransactionsSummaryTask>> AAT = Task.Run(async () =>
+            {
+                return await unitOfWorkAAT.InvokeAsync(db =>
+                {
+                    return (from T in db.Transactions
+                            where T.TransactionStatusID == (int)TransactionStatusEnum.AwaitingAuthorisation
+                               && T.ActionDate <= actionDate
+                               && (!entityID.HasValue ||
+                                   T.EntityID == entityID.Value)
+                               && (T.ServiceChannelID == (int)ServiceChannelEnum.FNBOnline ||
+                                   T.ServiceChannelID == (int)ServiceChannelEnum.FNBPACS ||
+                                   T.ServiceChannelID == (int)ServiceChannelEnum.FNBFintegrate)
+                            select new TransactionsSummaryTask
+                            {
+                                EntityID = T.EntityID,
+                                ServiceChannelID = T.ServiceChannelID,
+                                TransactionID = T.TransactionID,
+                                Amount = T.Amount,
+                                ActionDate = T.ActionDate,
+                                TransactionStatusID = T.TransactionStatusID
+                            }).ToListAsync();
+                });
+            });
+
+            //Awaiting Financial Release Transactions
+            var unitOfWorkAFR = Locator.Get<IUnitOfWork<DBOEntities>>("SubUnitOfWork");
+            Task<List<TransactionsSummaryTask>> AFR = Task.Run(async () =>
+            {
+                return await unitOfWorkAFR.InvokeAsync(db =>
+                {
+                    return (from T in db.Transactions
+                            where T.TransactionStatusID == (int)TransactionStatusEnum.AwaitingFinancialRelease
+                               && T.ActionDate <= actionDate
+                               && (!entityID.HasValue ||
+                                   T.EntityID == entityID.Value)
+                               && (T.ServiceChannelID == (int)ServiceChannelEnum.FNBOnline ||
+                                   T.ServiceChannelID == (int)ServiceChannelEnum.FNBPACS ||
+                                   T.ServiceChannelID == (int)ServiceChannelEnum.FNBFintegrate)
+                            select new TransactionsSummaryTask
+                            {
+                                EntityID = T.EntityID,
+                                ServiceChannelID = T.ServiceChannelID,
+                                TransactionID = T.TransactionID,
+                                Amount = T.Amount,
+                                ActionDate = T.ActionDate,
+                                TransactionStatusID = T.TransactionStatusID
+                            }).ToListAsync();
+                });
+            });
+
+            //Submitted Transactions
+            var unitOfWorkST = Locator.Get<IUnitOfWork<DBOEntities>>("SubUnitOfWork");
+            Task<List<TransactionsSummaryTask>> ST = Task.Run(async () =>
+            {
+                return await unitOfWorkST.InvokeAsync<List<TransactionsSummaryTask>>(db =>
+                {
+                    return (from T in db.Transactions
+                            where T.TransactionStatusID == (int)TransactionStatusEnum.Submitted
+                               && T.ActionDate == actionDate
+                               && (!entityID.HasValue ||
+                                   T.EntityID == entityID.Value)
+                               && (T.ServiceChannelID == (int)ServiceChannelEnum.FNBOnline ||
+                                   T.ServiceChannelID == (int)ServiceChannelEnum.FNBPACS ||
+                                   T.ServiceChannelID == (int)ServiceChannelEnum.FNBFintegrate)
+                            select new TransactionsSummaryTask
+                            {
+                                EntityID = T.EntityID,
+                                ServiceChannelID = T.ServiceChannelID,
+                                TransactionID = T.TransactionID,
+                                Amount = T.Amount,
+                                ActionDate = T.ActionDate,
+                                TransactionStatusID = T.TransactionStatusID
+                            }).ToListAsync();
+                });
+            });
+
+            Task.WaitAll(OT, OTF, AAOT, PT, AAT, AFR, ST);
+
+            //Outstanding Tasks Result
+            result.OutStandingTasks = OT.Result;
+            result.OutStandingTasksFuture = OTF.Result;
+
+            //Pending Task Result
+            result.Transactions_Pending_FNBOnline = new TransactionsSummary()
+            {
+                TransactionStatusID = (int)TransactionStatusEnum.Pending,
+                ServiceChannelID = (int)ServiceChannelEnum.FNBOnline,
+                SumOfTransactions = PT.Result.Where(pt => pt.ServiceChannelID == (int)ServiceChannelEnum.FNBOnline).Select(t => t.Amount).Sum(),
+                NumberOfTransactions = PT.Result.Where(pt => pt.ServiceChannelID == (int)ServiceChannelEnum.FNBOnline).Select(t => t.TransactionID).Count()
+            };
+
+            result.Transactions_Pending_PACS = new TransactionsSummary()
+            {
+                TransactionStatusID = (int)TransactionStatusEnum.Pending,
+                ServiceChannelID = (int)ServiceChannelEnum.FNBPACS,
+                SumOfTransactions = PT.Result.Where(pt => pt.ServiceChannelID == (int)ServiceChannelEnum.FNBPACS).Select(t => t.Amount).Sum(),
+                NumberOfTransactions = PT.Result.Where(pt => pt.ServiceChannelID == (int)ServiceChannelEnum.FNBPACS).Select(t => t.TransactionID).Count()
+            };
+
+            result.Transactions_Pending_Fintegrate = new TransactionsSummary()
+            {
+                TransactionStatusID = (int)TransactionStatusEnum.Pending,
+                ServiceChannelID = (int)ServiceChannelEnum.FNBFintegrate,
+                SumOfTransactions = PT.Result.Where(pt => pt.ServiceChannelID == (int)ServiceChannelEnum.FNBFintegrate).Select(t => t.Amount).Sum(),
+                NumberOfTransactions = PT.Result.Where(pt => pt.ServiceChannelID == (int)ServiceChannelEnum.FNBFintegrate).Select(t => t.TransactionID).Count()
+            };
+
+            //Awaiting Authorisation Task Result
+            result.Transactions_AwaitingAuthorisation_FNBOnline = new TransactionsSummary()
+            {
+                TransactionStatusID = (int)TransactionStatusEnum.AwaitingAuthorisation,
+                ServiceChannelID = (int)ServiceChannelEnum.FNBOnline,
+                SumOfTransactions = AAT.Result.Where(aat => aat.ServiceChannelID == (int)ServiceChannelEnum.FNBOnline).Select(t => t.Amount).Sum(),
+                NumberOfTransactions = AAT.Result.Where(aat => aat.ServiceChannelID == (int)ServiceChannelEnum.FNBOnline).Select(t => t.TransactionID).Count(),
+                NumberOfOutstandingTasks = AAOT.Result.Where(aaot => aaot.ServiceChannelID == (int)ServiceChannelEnum.FNBOnline).Select(t => t.BusinessEventTaskID).Distinct().Count()
+            };
+
+            result.Transactions_AwaitingAuthorisation_PACS = new TransactionsSummary()
+            {
+                TransactionStatusID = (int)TransactionStatusEnum.AwaitingAuthorisation,
+                ServiceChannelID = (int)ServiceChannelEnum.FNBPACS,
+                SumOfTransactions = AAT.Result.Where(aat => aat.ServiceChannelID == (int)ServiceChannelEnum.FNBPACS).Select(t => t.Amount).Sum(),
+                NumberOfTransactions = AAT.Result.Where(aat => aat.ServiceChannelID == (int)ServiceChannelEnum.FNBPACS).Select(t => t.TransactionID).Count(),
+                NumberOfOutstandingTasks = AAOT.Result.Where(aaot => aaot.ServiceChannelID == (int)ServiceChannelEnum.FNBPACS).Select(t => t.BusinessEventTaskID).Distinct().Count()
+            };
+
+            result.Transactions_AwaitingAuthorisation_Fintegrate = new TransactionsSummary()
+            {
+                TransactionStatusID = (int)TransactionStatusEnum.AwaitingAuthorisation,
+                ServiceChannelID = (int)ServiceChannelEnum.FNBFintegrate,
+                SumOfTransactions = AAT.Result.Where(aat => aat.ServiceChannelID == (int)ServiceChannelEnum.FNBFintegrate).Select(t => t.Amount).Sum(),
+                NumberOfTransactions = AAT.Result.Where(aat => aat.ServiceChannelID == (int)ServiceChannelEnum.FNBFintegrate).Select(t => t.TransactionID).Count(),
+                NumberOfOutstandingTasks = AAOT.Result.Where(aaot => aaot.ServiceChannelID == (int)ServiceChannelEnum.FNBFintegrate).Select(t => t.BusinessEventTaskID).Distinct().Count()
+            };
+
+            //Awaiting Financial Release Task Result
+            result.Transactions_AwaitingFinancialRelease_FNBOnline = new TransactionsSummary()
+            {
+                TransactionStatusID = (int)TransactionStatusEnum.AwaitingFinancialRelease,
+                ServiceChannelID = (int)ServiceChannelEnum.FNBOnline,
+                SumOfTransactions = AFR.Result.Where(afr => afr.ServiceChannelID == (int)ServiceChannelEnum.FNBOnline).Select(t => t.Amount).Sum(),
+                NumberOfTransactions = AFR.Result.Where(afr => afr.ServiceChannelID == (int)ServiceChannelEnum.FNBOnline).Select(t => t.TransactionID).Count()
+            };
+
+            result.Transactions_AwaitingFinancialRelease_PACS = new TransactionsSummary()
+            {
+                TransactionStatusID = (int)TransactionStatusEnum.AwaitingFinancialRelease,
+                ServiceChannelID = (int)ServiceChannelEnum.FNBPACS,
+                SumOfTransactions = AFR.Result.Where(afr => afr.ServiceChannelID == (int)ServiceChannelEnum.FNBPACS).Select(t => t.Amount).Sum(),
+                NumberOfTransactions = AFR.Result.Where(afr => afr.ServiceChannelID == (int)ServiceChannelEnum.FNBPACS).Select(t => t.TransactionID).Count()
+            };
+
+            result.Transactions_AwaitingFinancialRelease_Fintegrate = new TransactionsSummary()
+            {
+                TransactionStatusID = (int)TransactionStatusEnum.AwaitingFinancialRelease,
+                ServiceChannelID = (int)ServiceChannelEnum.FNBFintegrate,
+                SumOfTransactions = AFR.Result.Where(afr => afr.ServiceChannelID == (int)ServiceChannelEnum.FNBFintegrate).Select(t => t.Amount).Sum(),
+                NumberOfTransactions = AFR.Result.Where(afr => afr.ServiceChannelID == (int)ServiceChannelEnum.FNBFintegrate).Select(t => t.TransactionID).Count()
+            };
+
+            //Submitted Task Result
+            result.Transactions_Submitted_FNBOnline = new TransactionsSummary()
+            {
+                TransactionStatusID = (int)TransactionStatusEnum.Submitted,
+                ServiceChannelID = (int)ServiceChannelEnum.FNBOnline,
+                SumOfTransactions = ST.Result.Where(st => st.ServiceChannelID == (int)ServiceChannelEnum.FNBOnline).Select(t => t.Amount).Sum(),
+                NumberOfTransactions = ST.Result.Where(st => st.ServiceChannelID == (int)ServiceChannelEnum.FNBOnline).Select(t => t.TransactionID).Count()
+            };
+
+            result.Transactions_Submitted_PACS = new TransactionsSummary()
+            {
+                TransactionStatusID = (int)TransactionStatusEnum.Submitted,
+                ServiceChannelID = (int)ServiceChannelEnum.FNBPACS,
+                SumOfTransactions = ST.Result.Where(st => st.ServiceChannelID == (int)ServiceChannelEnum.FNBPACS).Select(t => t.Amount).Sum(),
+                NumberOfTransactions = ST.Result.Where(st => st.ServiceChannelID == (int)ServiceChannelEnum.FNBPACS).Select(t => t.TransactionID).Count()
+            };
+
+            result.Transactions_Submitted_Fintegrate = new TransactionsSummary()
+            {
+                TransactionStatusID = (int)TransactionStatusEnum.Submitted,
+                ServiceChannelID = (int)ServiceChannelEnum.FNBFintegrate,
+                SumOfTransactions = ST.Result.Where(st => st.ServiceChannelID == (int)ServiceChannelEnum.FNBFintegrate).Select(t => t.Amount).Sum(),
+                NumberOfTransactions = ST.Result.Where(st => st.ServiceChannelID == (int)ServiceChannelEnum.FNBFintegrate).Select(t => t.TransactionID).Count()
+            };
+
+            return result;
+        }
+
+        #endregion
+    }
+}
