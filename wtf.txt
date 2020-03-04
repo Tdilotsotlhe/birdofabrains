@@ -1,0 +1,833 @@
+using Common.Logging;
+using InsureGroup_DataAccess.DbConstants;
+using InsureGroup_DataAccess.DTO;
+using InsureGroup_DataAccess.DTOs;
+using InsureGroup_Infrastructure.Authorization;
+using InsureGroup_Infrastructure.Classes;
+using InsureGroup_Infrastructure.Classes.MessageTypes;
+using InsureGroup_Infrastructure.Const;
+using InsureGroup_Infrastructure.Contracts;
+using InsureGroup_Infrastructure.Enums;
+using InsureGroup_Infrastructure.Repositories;
+using InsureGroup_Infrastructure.Utilities;
+using InsureGroup_Web_Api.Attributes;
+using Microsoft.Practices.Unity;
+using ServiceStack.Text;
+using System;
+using System.Collections.Generic;
+using System.Configuration;
+using System.Data;
+using System.Globalization;
+using System.IO;
+using System.Linq;
+using System.Net;
+using System.Net.Http;
+using System.Text;
+using System.Threading.Tasks;
+using System.Web.Http;
+using Xcelerate.DataAccess.DBO.Enums;
+using Xcelerate.DataAccess.DBO.Models;
+
+namespace InsureGroup_Web_Api.Controllers
+{
+    public class TransactionController : BaseController<Transaction, TransactionDto, ITransactionRepository<Transaction, TransactionDto>>
+    {
+        [Dependency]
+        public Lazy<IWorkflow> Workflow { get; set; }
+
+        [Dependency]
+        public Lazy<ITransactionAuthorisationService> TransactionAuthService { get; set; }
+
+        [Dependency]
+        public Lazy<IRhinoService> RhinoService { get; set; }
+
+        [Dependency]
+        public Lazy<IBusinessEventTaskRepository<BusinessEventTask, BusinessEventTaskDto>> BusinessEventTaskRepository { get; set; }
+
+        [Dependency]
+        public Lazy<IMailService> MailService { get; set; }
+
+        [Dependency]
+        public Lazy<ITransactionTypeRepository<TransactionType, TransactionTypeDto>> TransactionTypeRepository { get; set; }
+
+        [Dependency]
+        public Lazy<IBusinessEventTaskUserRepository<BusinessEventTaskUser, BusinessEventTaskUserDto>> BusinessEventTaskUserRepository { get; set; }
+
+        [Dependency]
+        public Lazy<IRecallChargeRepository> RecallChargeRepository { get; set; }
+
+        [Dependency]
+        public Lazy<IUnitOfWork<DBOEntities>> UnitOfWork { get; set; }
+
+        [ActionName("GetTransactionAuthLookups")]
+        public async Task<HttpResponseMessage> GetTransactionAuthLookups()
+        {
+            return OkJson(await Repository.GetTransactionAuthLookups());
+        }
+
+        [ActionName("GetLoadNotAuthorizedTransactionsForJournals")]
+        public async Task<HttpResponseMessage> GetLoadNotAuthorizedTransactionsForJournals()
+        {
+            try
+            {
+                return Ok(await Repository.GetLoadNotAuthorizedTransactionsForJournals());
+            }
+            catch (Exception ex)
+            {
+                return Request.CreateResponse(HttpStatusCode.NotFound, ex.Message);
+            }
+        }
+
+        [ActionName("GetLoadNotAuthorizedTransactionsForImport")]
+        public async Task<HttpResponseMessage> GetLoadNotAuthorizedTransactionsForImport()
+        {
+            return Ok(await Repository.GetLoadNotAuthorizedTransactionsForImport());
+        }
+
+        [ActionName("GetLoadNotAuthorizedTransactionsForTransactions")]
+        public async Task<HttpResponseMessage> GetLoadNotAuthorizedTransactionsForTransactions()
+        {
+            return Ok(await Repository.GetLoadNotAuthorizedTransactionsForTransactions());
+        }
+
+        private Common.Logging.ILog _log;
+
+        [HttpPost]
+        [ActionName("AcceptMultiImport")]
+        public HttpResponseMessage AcceptMultiImport(TransactionDto dto)
+        {
+            var appSettings = ConfigurationManager.AppSettings;
+            var db = ServiceLocator.DBContext;
+            JsConfig.DateHandler = DateHandler.ISO8601;
+
+            //get
+            var fileimport = db.FileImports.Find(dto.FileImportID);
+
+            using (var networkAccessor = NetworkShareAccesser.Access(appSettings["XceleServices"], appSettings["Domain"], appSettings["SSRSLogin"], appSettings["SSRSPassword"]))
+            {
+                var saveFileName = string.Join(".", Path.GetFileNameWithoutExtension(fileimport.Filename), "save");
+                saveFileName = string.Concat(saveFileName, dto.SplitFileIndex == 0 ? string.Empty : dto.SplitFileIndex.ToString());
+                var pathWithFile = Path.Combine(fileimport.FileFullPath, saveFileName);
+                if (File.Exists(pathWithFile))
+                    File.Delete(pathWithFile);
+
+                var fs = new FileStream(pathWithFile, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.ReadWrite);
+                JsonSerializer.SerializeToStream(dto, fs);
+                fs.Close();
+                fs.Dispose();
+            }
+
+            if (dto.SplitFileIndex == dto.SplitFileCount)
+            {
+                fileimport.Step_InQSaving = true;
+                db.SaveChanges();
+
+                //Q
+                //if (fileimport.DateSelected == DateTime.Today)
+                RhinoService.Value.SubmitMessage(new FileImportTodayMessage(fileimport.FileImportID));
+                //else
+                //    RhinoService.Value.SubmitMessage(new FileImportFutureMessage(fileimport.FileImportID));
+
+                return Request.CreateResponse(HttpStatusCode.Created, new { status = (int)HttpStatusCode.Created });
+            }
+
+            return Request.CreateResponse(HttpStatusCode.OK, new { status = (int)HttpStatusCode.OK, splitFileIndex = dto.SplitFileIndex.ToString() });
+        }
+
+        [HttpPost]
+        [ActionName("AcceptImport")]
+        public HttpResponseMessage AcceptImport(TransactionDto dto)
+        {
+            var appSettings = ConfigurationManager.AppSettings;
+            var db = ServiceLocator.DBContext;
+            JsConfig.DateHandler = DateHandler.ISO8601;
+            //get
+            var fileimport = db.FileImports.Find(dto.FileImportID);
+
+#if !DEBUG
+            using (var networkAccessor = NetworkShareAccesser.Access(appSettings["XceleServices"], appSettings["Domain"], appSettings["SSRSLogin"], appSettings["SSRSPassword"]))
+#endif
+            {
+                var saveFileName = string.Join(".", Path.GetFileNameWithoutExtension(fileimport.Filename), "save");
+                var pathWithFile = Path.Combine(fileimport.FileFullPath, saveFileName);
+                if (File.Exists(pathWithFile))
+                    File.Delete(pathWithFile);
+
+                var fs = new FileStream(pathWithFile, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.ReadWrite);
+                JsonSerializer.SerializeToStream(dto, fs);
+                fs.Close();
+                fs.Dispose();
+            }
+
+            using (var dbNow = new DBOEntities())
+            {
+                dbNow.Configuration.ProxyCreationEnabled = true;
+                var fi = dbNow.FileImports.Find(dto.FileImportID);
+                fi.Step_InQSaving = true;
+
+                dbNow.SaveChanges();
+            }
+
+            //Q
+            // if (fileimport.DateSelected == DateTime.Today)
+            RhinoService.Value.SubmitMessage(new FileImportTodayMessage(fileimport.FileImportID));
+            //else
+            //    RhinoService.Value.SubmitMessage(new FileImportFutureMessage(fileimport.FileImportID));
+
+            return Request.CreateResponse(HttpStatusCode.OK);
+        }
+
+        [HttpPost]
+        [ActionName("CancelImport")]
+        public HttpResponseMessage CancelImport(TransactionDto dto)
+        {
+            var db = ServiceLocator.DBContext;
+
+            //get
+            var fileimport = db.FileImports.Find(dto.FileImportID);
+            fileimport.FileImportStatusID = (int)FileImportStatusEnum.Cancelled;
+            db.SaveChanges();
+
+            return Request.CreateResponse(HttpStatusCode.OK);
+        }
+
+        [HttpGet]
+        [ActionName("GetLinkedTransactions")]
+        public async Task<HttpResponseMessage> GetLinkedTransactions(int bankAccountTransactionID)
+        {
+            return OkJson(await Repository.GetLinkedTransactions(bankAccountTransactionID));
+        }
+
+        [HttpGet]
+        [ActionName("GetTransactionDetail")]
+        public TransactionDetail GetTransactionDetail(int transactionID)
+        {
+            return Repository.LoadTransactionDetails(transactionID);
+        }
+
+        [HttpGet]
+        [ActionName("DownloadTransactionDocument")]
+        public TransactionDocDto DownloadTransactionDocument(int tID)
+        {
+            return Repository.LoadTransactionDocument(tID);
+        }
+
+        // GET api/Transaction
+        public IQueryable<TransactionDto> GetTransactions(int bucketIDKey)
+        {
+            IQueryable<TransactionDto> dtos = Repository.LoadTransactions(bucketIDKey);
+            if (dtos == null)
+            {
+                throw new HttpResponseException(Request.CreateResponse(HttpStatusCode.NotFound, 0));
+            }
+            return dtos;
+        }
+
+        public IQueryable<TransactionDto> GetTransactions(int transactionTypeID, int entityID, int quoteSubAccountID, int bucketID, double amount)
+        {
+            IQueryable<TransactionDto> dtos = Repository.LoadTransactions(transactionTypeID, entityID, quoteSubAccountID, bucketID, amount);
+            if (dtos == null)
+            {
+                throw new HttpResponseException(Request.CreateResponse(HttpStatusCode.NotFound, 0));
+            }
+            return dtos;
+        }
+
+        private static CultureInfo cultureInfo = new CultureInfo("en-US");
+        //[HttpGet]
+        //public TransactionDto GetNextPage(int? pageNum)
+        //{
+        //    var page = pageNum ?? 1;
+        //    if (TransactionRepository.CurrentSearchResults == null)
+        //    {
+        //        throw new HttpResponseException(Request.CreateResponse(HttpStatusCode.BadRequest, "Please select Search First"));
+        //    }
+        //    return Repository.GetNextResult(page);
+        //}
+
+        [ActionName("GetClientTransactions")]
+        public async Task<HttpResponseMessage> GetClientTransactions(int? entityID, int? serviceID, DateTime? dateFrom, DateTime? dateTo, string transactionReference, string uniqueIdentifier, double? amount, int? ACBBatchID, int bankAccountTransactionID, int startPage, int? totalRecords)
+        {
+            //disable paging if we are searching and linking on ACBBatch
+            if (ACBBatchID != null)
+                startPage = 0;
+
+            var dtos = await Repository.GetClientTransactions(new ClientTransactionSearchDto
+            {
+                EntityID = entityID,
+                ServiceID = serviceID,
+                DateFrom = dateFrom,
+                DateTo = dateTo,
+                TransactionReference = transactionReference,
+                UniqueIdentifier = uniqueIdentifier,
+                Amount = amount,
+                ACBBatchID = ACBBatchID,
+                BankAccountTransactionID = bankAccountTransactionID,
+                StartPage = startPage,
+                TotalRecords = totalRecords
+            });
+
+            if (dtos.Any())
+                return Ok(dtos);
+
+            return NotFound(entityID);
+        }
+
+        [HttpGet]
+        [ActionName("SearchTransactions")]
+        public HttpResponseMessage SearchTransactions([FromUri]TransactionSearchCriteriaDto criteria)
+        {
+            //TransactionSearchDto
+            criteria.BucketInclusionDate = UserUtility.IsInternalUser() ? BucketRepositoryExtensions.BucketInclusionDateInternal : BucketRepositoryExtensions.BucketInclusionDate;
+            var dto = Repository.SearchTransactions(criteria);
+
+            if (dto.Transactions.Count() > 0)
+                return Request.CreateResponse(HttpStatusCode.OK, dto);
+
+            return Request.CreateResponse(HttpStatusCode.NotFound, dto);
+        }
+
+        private void initialiseDateFilters(string startDate, string endDate, out DateTime startDateTime, out DateTime endDateTime)
+        {
+            startDateTime = GetDateTime(startDate);
+            endDateTime = GetDateTime(endDate);
+
+            if (startDateTime != DateTime.MinValue && endDateTime != DateTime.MinValue)
+                return;
+
+            startDateTime = DateTime.Now.AddMonths(-3);
+            endDateTime = DateTime.Now;
+        }
+
+        private DateTime GetDateTime(string date)
+        {
+            DateTime dateTime = new DateTime();
+            DateTime.TryParse(date, cultureInfo, DateTimeStyles.AdjustToUniversal, out dateTime);
+
+            return dateTime;
+        }
+
+        [HttpGet]
+        [ActionName("GetByBankAccountTransactionID")]
+        public IQueryable<TransactionDto> GetByBankAccountTransactionID(int bankAccountTransactionID)
+        {
+            IQueryable<TransactionDto> dtos = Repository.GetByBankAccountTransactionID(bankAccountTransactionID);
+            if (dtos == null)
+            {
+                throw new HttpResponseException(Request.CreateResponse(HttpStatusCode.NotFound, 0));
+            }
+            return dtos;
+        }
+
+        [HttpGet]
+        [ActionName("GetTransactionsByClientImportFileID")]
+        public IEnumerable<TransactionDto> GetTransactionsByClientImportFileID(int clientImportFileID)
+        {
+            var dtos = Repository.GetTransactionsByClientImportFileID(clientImportFileID);
+            if (dtos == null)
+            {
+                throw new HttpResponseException(Request.CreateResponse(HttpStatusCode.NotFound, 0));
+            }
+            return dtos;
+        }
+
+        [HttpGet]
+        [ActionName("GetManualTransactions")]
+        public IEnumerable<TransactionDto> GetManualTransactions(int bucketID)
+        {
+            IEnumerable<TransactionDto> dtos = Repository.GetManualTransactions(bucketID);
+            if (dtos == null)
+            {
+                throw new HttpResponseException(Request.CreateResponse(HttpStatusCode.NotFound, 0));
+            }
+            return dtos;
+        }
+
+        private void SendMailToEntityContactPersons(DBOEntities context, List<EntityContactPersonDto> entityContactPersons, List<TransactionDto> transactions, UserUserDto loggedInUser)
+        {
+            var messageBuiler = new StringBuilder();
+            var firstTransaction = transactions.First();
+            var forEntity = context.Entities.Where(x => x.EntityID == firstTransaction.EntityID).FromCache().First();
+
+            messageBuiler.AppendFormat("Please contact {0} {1} of {2} regarding the cancelling of the below transaction(s) for \"{3}\":\n", loggedInUser.FirstName, loggedInUser.LastName, loggedInUser.EntityName, forEntity.EntityName);
+
+            foreach (var transaction in transactions)
+            {
+                var transactionType = TransactionTypeRepository.Value.GetEntity(transaction.TransactionTypeID);
+                var transactionAmount = StringUtility.FormatCurrency(transaction.Amount, Cultures.SouthAfrica);
+
+                messageBuiler.AppendFormat("\t{0:yyyy-MM-dd}, {1}, {2}, {3}", transaction.ActionDate, transactionType.ShortDescription, transaction.AccountNumber, transactionAmount);
+            }
+
+            var message = messageBuiler.ToString();
+
+            foreach (var entityContactPerson in entityContactPersons)
+                MailService.Value.SendMail(entityContactPerson.EMailAddress, "Attention Requested: Transaction Recall", message);
+        }
+
+        [HttpGet]
+        [ActionName("RecallTransactionByClientFileID")]
+        public HttpResponseMessage RecallTransactionByClientFileID(int clientImportFileID)
+        {
+            var transactions = Repository.GetTransactionByFileWithAuth(clientImportFileID);
+            var entityId = transactions.First().EntityID;
+            TransactionAuthService.Value.StartTransactionRecallWorkflow(entityId, ClassTypeEnum.ClientImportFile, clientImportFileID, transactions);
+            return Ok();
+        }
+
+        [HttpGet]
+        [ActionName("RecallTransaction")]
+        public HttpResponseMessage RecallTransaction(int transactionID)
+        {
+            var transactions = Repository.GetTransactionsWithAuth(transactionID);
+            var transaction = transactions.First();
+            var entityId = transaction.EntityID;
+            int ID;
+            ClassTypeEnum classType;
+            if (transaction.JournalID.HasValue)
+            {
+                ID = transaction.JournalID.Value;
+                classType = ClassTypeEnum.Journal;
+            }
+            else
+            {
+                ID = transaction.TransactionID;
+                classType = ClassTypeEnum.Transaction;
+            }
+            TransactionAuthService.Value.StartTransactionRecallWorkflow(entityId, classType, ID, transactions);
+
+            return Request.CreateResponse(HttpStatusCode.OK);
+        }
+
+        [HttpGet]
+        [ActionName("GetManualTransactions")]
+        public IQueryable<TransactionDto> GetManualTransactions(int bucketID, int entityID, DateTime? actionDate)
+        {
+            return Repository.GetEntities(t => t.BucketID == bucketID &&
+                                               t.EntityID == entityID &&
+                                               t.ClientImportFileID == null &&
+                                               (
+                                                   t.TransactionStatusID == (int)TransactionStatusEnum.AwaitingAuthorisation ||
+                                                    t.TransactionStatusID == (int)TransactionStatusEnum.AwaitingFinancialRelease ||
+                                                   (t.JournalID.HasValue ? t.TransactionStatusID == (int)TransactionStatusEnum.Processed : false) ||
+                                                   t.TransactionStatusID == (int)TransactionStatusEnum.Pending// ||
+                                                                                                              // t.TransactionStatusID == (int)TransactionStatusEnum.Submitted ||
+                                                                                                              // t.TransactionStatusID == (int)TransactionStatusEnum.Processed ||
+                                                                                                              // t.TransactionStatusID == (int)TransactionStatusEnum.NAEDOTracking
+                                               ) && t.TransactionTypeID != (int)TransactionTypeEnum.CollectionRejection).ToList().Where(t => actionDate.HasValue ? t.ActionDate.Day == actionDate.Value.Day && t.ActionDate.Month == actionDate.Value.Month && t.ActionDate.Year == actionDate.Value.Year : true).AsQueryable();
+        }
+
+        [HttpPost]
+        [ActionName("UpdateChargeClientForRecall")]
+        public HttpResponseMessage UpdateChargeClientForRecall(int id, int chargeClient, int isFile)
+        {
+            if (Convert.ToBoolean(isFile))
+                return updateFileChargeClient(id, Convert.ToBoolean(chargeClient));
+
+            return updateTransactionChargeClient(id, Convert.ToBoolean(chargeClient));
+        }
+
+        private HttpResponseMessage updateTransactionChargeClient(int transactionID, bool chargeClient)
+        {
+            var transaction = Repository.GetEntity(t => t.TransactionID == transactionID);
+            transaction.ChargeClientForRecall = chargeClient;
+            Repository.SaveEntity(transaction, bypass: true);
+
+            return Request.CreateResponse(HttpStatusCode.OK);
+        }
+
+        private HttpResponseMessage updateFileChargeClient(int clientImportFileID, bool chargeClient)
+        {
+            var transactions = Repository.GetEntities(t => t.ClientImportFileID == clientImportFileID);
+
+            transactions.ForEach(t => t.ChargeClientForRecall = chargeClient);
+            transactions.ForEach(t => Repository.SaveEntity(t));
+
+            return Request.CreateResponse(HttpStatusCode.OK);
+        }
+
+        private TransactionDto Save(TransactionDto dto, Func<TransactionDto, TransactionDto> save)
+        {
+            try
+            {
+                var db = ServiceLocator.DBContext;
+                if (dto.BankAccountTransactionID != null) //used for bank recon
+                {
+                    BankAccountTransaction bankAccountTransaction = db.BankAccountTransactions.SingleOrDefault(x => x.BankAccountTransactionID == dto.BankAccountTransactionID);
+                    BankAccount bankAcc = db.BankAccounts.SingleOrDefault(x => x.BankAccountID == bankAccountTransaction.BankAccountID);
+                    if (dto.AccountHolder == null)
+                        dto.AccountHolder = bankAcc.AccountHolder;
+                    if (dto.BankAccountTypeID == null || dto.BankAccountTypeID == 0)
+                        dto.BankAccountTypeID = bankAcc.BankAccountTypeID;
+                }
+
+                if (dto.TransactionTypeID == (int)TransactionTypeEnum.InternalAccountTransfer)
+                {
+                    //check for ig bank account
+                    string bankAccNumber = dto.AccountNumber;
+                    int accType = 0;
+                    if (dto.BankAccountTypeID != null)
+                        accType = dto.BankAccountTypeID.Value;
+
+                    var result = from e in db.Entities
+                                 join be in db.BankAccountEntities on e.EntityID equals be.EntityID
+                                 join b in db.BankAccounts on be.BankAccountID equals b.BankAccountID
+                                 where e.EntityTypeID == (int)EntityTypeEnum.InsureGroup && b.AccountNumber == bankAccNumber && b.BankAccountTypeID == accType
+                                 select b;
+
+                    if (!result.Any())
+                        throw new Exception("Internal Transfer only allowed to another Insure Group internal bank account");
+                }
+
+                if (dto.ServiceChannelID == null || dto.ServiceChannelID == 0)
+                    dto.ServiceChannelID = (int)ServiceChannelEnum.FNBPACS;
+                //SMI-14609 Temporarily for testing
+                //dto.TransactionStatusID = (int)TransactionStatusEnum.AwaitingAuthorisation;           
+
+                TransactionDto updatedDTO = save(dto);
+            
+                //Workflow (if not file aka Manual trans)
+                //if(dto.ClientImportFileID == null)
+                //    WorkflowUtility.Instance().UpdateWorkflow(updatedDTO.EntityID, updatedDTO.TransactionID, BusinessEventEnum.CaptureTransactionImportFile, null, ObjectTypeEnum.Transaction);
+
+                return updatedDTO;
+            }
+            catch (RuleException e)
+            {
+                throw new HttpResponseException(Request.CreateResponse(HttpStatusCode.Forbidden, e.Message));
+            }
+            catch (RuleListException rle)
+            {
+                //This was changed to accomodate IE since it does not handle a redirect response adequately.
+
+                //throw new HttpResponseException(Request.CreateResponse(HttpStatusCode.SeeOther, dto));
+                throw new HttpResponseException(Request.CreateResponse(HttpStatusCode.Unused, dto));
+            }
+        }
+
+        [Dependency]
+        public Lazy<IHttpHeaderUtility> HttpHeaderUtility { get; set; }
+
+        [HttpPost]
+        [ActionName("PostNominated")]
+        public PayNominatedTransactionDto PostNominated(PayNominatedTransactionDto dto)
+        {
+            var list = new List<TransactionDto>();
+            var ignoreRules = HttpHeaderUtility.Value.GetHeaderValue<bool>("X-IgnoreRules");
+            var tempTransactions = ignoreRules ? dto.Transactions.ToList() : Repository.NegativeBalanceRule(dto.Transactions.ToList());
+            foreach (var transaction in tempTransactions)
+            {
+                if (transaction.Amount <= 0)
+                    throw new HttpResponseException(Request.CreateResponse(HttpStatusCode.Forbidden, "Zero or Negative Amount not allowed!"));
+
+                _log = LogManager.GetLogger(typeof(TransactionRepository));
+                _log.Info("Transaction Post: Start Saving");
+
+                transaction.ServiceTypeID = (int)ServiceTypeEnum.SameDay;
+
+                if (transaction.RealTime.GetValueOrDefault())
+                {
+                    transaction.ServiceChannelID = (int)ServiceChannelEnum.FNBOnline;
+                    transaction.ServiceTypeID = (int)ServiceTypeEnum.Realtime;
+                }
+                else
+                if (transaction.ForcedReferencing.GetValueOrDefault())
+                {
+                    transaction.ServiceChannelID = (int)ServiceChannelEnum.FNBOnline;
+                }
+                else
+                if (CheckIsFintegrateTransaction(transaction))
+                {
+                    transaction.ServiceChannelID = (int)ServiceChannelEnum.FNBFintegrate;
+                }
+                else
+                {
+                    transaction.ServiceChannelID = (int)ServiceChannelEnum.FNBPACS;
+                }
+
+                var result = new TransactionDto();
+                result = Save(transaction, base.Post);
+
+                int serviceId = result.TransactionTypeID == (int)TransactionTypeEnum.Collection ? (int)ServiceEnum.Collections : (int)ServiceEnum.Payments;
+                UnitOfWork.Value.ExecuteProcedure(StoredProcedureNames.UpdateServiceChannelServiceType, CommandType.StoredProcedure, param: new { TransactionId = result.TransactionID, BucketId = result.BucketID, ServiceId = serviceId });
+
+                if (ignoreRules || result.Exceptions.Count == 0)
+                {
+                    //############## TRANSACTION AUTH ##############\\                    
+                    TransactionAuthService.Value.StartTransactionCreatedWorkflow(result.EntityID, ClassTypeEnum.Transaction, result.TransactionID, new[] { result });
+                    //############## ---------------- ##############\\  
+                }
+                list.Add(result);
+
+            }
+
+
+            dto = new PayNominatedTransactionDto
+            {
+                Transactions = list.ToArray()
+            };
+
+            if (!ignoreRules)
+            {
+                if (dto.Transactions.Any(a => a.Exceptions.Count > 0))
+                {
+                    //This was changed to accomodate IE since it does not handle a redirect response adequately.
+
+                    //throw new HttpResponseException(Request.CreateResponse(HttpStatusCode.SeeOther, dto));
+                    throw new HttpResponseException(Request.CreateResponse(HttpStatusCode.Unused, dto));
+                }
+
+            }
+
+            return dto;
+
+        }
+
+        [HttpPost]
+        [NonTransactional]
+        [ActionName("Post")]
+        public override TransactionDto Post(TransactionDto dto)
+        {
+            var result = dto;
+            try
+            {
+                if (Repository.IsUnNominatedNonPremiumPayment(dto))
+                    throw new HttpResponseException(Request.CreateResponse(HttpStatusCode.Forbidden,
+                        "Bank Account number is linked to an INSURER/UMA for a premium payment. Please complete a payment party schedule for Bank Account to be nominated."));
+                if (dto.Amount <= 0)
+                    throw new HttpResponseException(Request.CreateResponse(HttpStatusCode.Forbidden, "Zero or Negative Amount not allowed!"));
+
+                _log = LogManager.GetLogger(typeof(TransactionRepository));
+                _log.Info("Transaction Post: Start Saving");
+
+                dto.ServiceTypeID = (int)ServiceTypeEnum.SameDay;
+
+                if (dto.RealTime.GetValueOrDefault())
+                {
+                    dto.ServiceChannelID = (int)ServiceChannelEnum.FNBOnline;
+                    dto.ServiceTypeID = (int)ServiceTypeEnum.Realtime;
+                }
+                else
+                if (dto.ForcedReferencing.GetValueOrDefault())
+                {
+                    dto.ServiceChannelID = (int)ServiceChannelEnum.FNBOnline;
+                }
+                else
+                if (CheckIsFintegrateTransaction(dto))
+                {
+                    dto.ServiceChannelID = (int)ServiceChannelEnum.FNBFintegrate;
+                }
+                else
+                {
+                    dto.ServiceChannelID = (int)ServiceChannelEnum.FNBPACS;
+                }
+
+                UnitOfWork.Value.Invoke(context =>
+                {
+                    result = Save(dto, base.Post);
+                });
+
+                int serviceId = result.TransactionTypeID == (int)TransactionTypeEnum.Collection ? (int)ServiceEnum.Collections : (int)ServiceEnum.Payments;
+                UnitOfWork.Value.ExecuteProcedure(StoredProcedureNames.UpdateServiceChannelServiceType, CommandType.StoredProcedure, param: new { TransactionId = result.TransactionID, BucketId = result.BucketID, ServiceId = serviceId });
+
+                //############## TRANSACTION AUTH ##############\\
+                UnitOfWork.Value.Invoke(context =>
+                {
+                    TransactionAuthService.Value.StartTransactionCreatedWorkflow(result.EntityID, ClassTypeEnum.Transaction, result.TransactionID, new[] { result });
+                });
+                //############## ---------------- ##############\\
+
+                return result;
+            }
+            catch (Exception ex)
+            {
+                if (ex.GetType() != typeof(RuleListException) || ex.GetType() != typeof(RuleException))
+                {
+                    UnitOfWork.Value.Invoke(context =>
+                    {
+                        Repository.DeleteEntity(result.TransactionID);
+                    });
+                }
+
+                throw ex;
+            }
+        }
+
+        public override TransactionDto Put(int id, TransactionDto dto)
+        {
+            return base.Put(id, dto);
+        }
+
+        private void updateTransactionAuthStatus(IEnumerable<TransactionDto> transactions, TransactionAuthoriseEnum AuthStatus)
+        {
+            if (!transactions.Any())
+                return;
+
+
+            var id = transactions.First().ClientImportFileID.HasValue ? transactions.First().ClientImportFileID.GetValueOrDefault() : transactions.First().TransactionID;
+            var tempTableName = string.Format("##TransactionAuthStatusFrontEnd{0}{1}", Enum.GetName(typeof(TransactionAuthoriseEnum), AuthStatus), id);
+
+            var transactionRepository = ServiceLocator.Get<ITransactionRepository<Transaction, TransactionDto>>();
+            UnitOfWork.Value.ExecuteProcedure("CREATE TABLE " + tempTableName + " (TransactionID INT NOT NULL)", commandType: CommandType.Text);
+            UnitOfWork.Value.SaveBulkEntities(tableName: tempTableName
+       , data: transactions, objectState: null, notifyRowsCopied: null, columnNames: new string[] { "TransactionID" });
+
+            int rowsAffected = UnitOfWork.Value.ExecuteProcedure(StoredProcedureNames.UpdateTransactionAuthStatus,
+                param: new
+                {
+                    TransactionAuthStatusID = (int)AuthStatus,
+                    TableName = tempTableName
+                    //TransactionIDs = transactionIDDataTable.AsTableValuedParameter(DatabaseTypes.TransactionIDList),
+                }, commandType: CommandType.StoredProcedure);
+        }
+
+        [HttpPost]
+        [ActionName("AuthorizeTransaction")]
+        public HttpResponseMessage AuthorizeTransaction(AuthorizationDto auth)
+        {
+            if (!TransactionAuthService.Value.AuthoriseUser(UserUtility.GetUserID(), auth.BusinessEventTasks))
+                return Request.CreateResponse(HttpStatusCode.Unauthorized);
+            //Handle each task separately 
+            foreach (var task in auth.BusinessEventTasks)
+                TransactionAuthService.Value.AuthoriseTransactions(task);
+
+            return Request.CreateResponse(HttpStatusCode.OK);
+        }
+
+        [HttpPost]
+        [ActionName("PostLinkedTransactions")]
+        public HttpResponseMessage PostLinkedTransactions(TransactionDto dto)
+        {
+            dto = Repository.SaveLinkedTransactions(dto);
+            return Ok(dto);
+        }
+
+        [HttpPost]
+        [ActionName("PostMultipleTransactions")]
+        public HttpResponseMessage PostMultipleTransactions(TransactionDto dto)
+        {
+            dto = Repository.SaveAllocatedTransactions(dto);
+            return Ok(dto);
+        }
+
+        [HttpPost]
+        [ActionName("UpdateTransactionImport")]
+        public HttpResponseMessage UpdateTransactionImport(TransactionDto transactions)
+        {
+            transactions = Repository.UpdateTransaction(transactions);
+
+
+            return Request.CreateResponse(HttpStatusCode.OK);
+        }
+
+        //Transaction AUTH
+        [HttpGet]
+        [ActionName("GetNotAuthorizedTransactionsForLoggedInUser")]
+        public NotAuthorizedDto GetNotAuthorizedTransactionsForLoggedInUser()
+        {
+            NotAuthorizedDto dto = Repository.LoadNotAuthorizedTransactionsForLoggedInUser();
+            if (dto == null)
+            {
+                throw new HttpResponseException(Request.CreateResponse(HttpStatusCode.NotFound, 0));
+            }
+            return dto;
+        }
+
+        //[HttpGet]
+        //[ActionName("GetTransactionsForBusinessEvent")]
+        //public HttpResponseMessage GetTransactionsForBusinessEvent(int businessEventTaskID)
+        //{
+        //    var json = Repository.LoadTransactionsForBusinessEvent2(businessEventTaskID);
+        //    if (string.IsNullOrEmpty(json))
+        //    {
+        //        throw new HttpResponseException(Request.CreateResponse(HttpStatusCode.NotFound, 0));
+        //    }
+        //    return OkJson(json);
+        //}
+
+        [HttpGet]
+        [ActionName("GetTransactionsForBusinessEvent")]
+        public HttpResponseMessage GetTransactionsForBusinessEvent(int businessEventTaskID)
+        {
+            var result = Repository.LoadTransactionsForBusinessEvent(businessEventTaskID);
+            if (result == null)
+            {
+                throw new HttpResponseException(Request.CreateResponse(HttpStatusCode.NotFound, 0));
+            }
+            return Ok(result);
+        }
+
+        [HttpGet]
+        public TransactionRecallInfoDto GetRecallInfo(int id)
+        {
+            return Repository.GetRecallInfo(id);
+        }
+
+        [HttpGet]
+        [ActionName("UnAllocateClientTransaction")]
+        public HttpResponseMessage UnAllocateClientTransaction(int transactionID)
+        {
+            try
+            {
+                var dto = Repository.BankAccountTransactionRepository.Value.UnAllocateClientTransaction(transactionID);
+                return Ok(dto);
+            }
+            catch (ObjectNotFoundException ex)
+            {
+                return Forbidden(ex.Message);
+            }
+            catch (Exception ex)
+            {
+                return ServerError(ex);
+            }
+        }
+
+        [HttpGet]
+        [ActionName("GetRecallCharges")]
+        public HttpResponseMessage GetRecallCharges(int id, int subAccountID, int isBatch)
+        {
+            var isInternal = UserUtility.IsInternalUser();
+            var dto = isBatch == 0
+                ? RecallChargeRepository.Value.GetSingleRecallCharge(id, subAccountID, isInternal)
+                : GetBatchRecallCharge(id, subAccountID, isInternal);
+
+            return Ok(dto);
+        }
+
+        [HttpGet]
+        [RequirePermission(RoleRoleTypeEnum.AccountsUser)]
+        [ActionName("GetTransactionsReport")]
+        public TransactionDashboard GetTransactionsReport(DateTime? actionDate = null)
+        {
+            return Repository.GetDashboardReport(actionDate);
+        }
+
+        #region Private methods
+
+        private RecallChargeDto GetBatchRecallCharge(int clientImportFileID, int subAccountID, bool isInternal)
+        {
+            return RecallChargeRepository.Value.ValidateBatchImport(clientImportFileID)
+                ? RecallChargeRepository.Value.GetBatchRecallCharge(clientImportFileID, subAccountID, isInternal)
+                : RecallChargeRepository.Value.GetSingleRecallCharge(RecallChargeRepository.Value.GetFirstTransactionID(clientImportFileID), subAccountID, isInternal);
+        }
+
+        private bool CheckIsFintegrateTransaction(TransactionDto dto)
+        {
+            var db = ServiceLocator.DBContext;
+
+            var isFintegrateTransactionQuery = from qicg in db.QuoteInterestCalculationGroups
+                                               join ba in db.BankAccounts on qicg.BankAccountID equals ba.BankAccountID
+                                               join acbu in db.ACBUsers on ba.ACBUserID equals acbu.ACBUserID
+                                               join acbuec in db.ACBUserEntryClasses on acbu.ACBUserID equals acbuec.ACBUserID
+                                               join acbec in db.ACBEntryClasses on acbuec.ACBEntryClassID equals acbec.ACBEntryClassID
+                                               where acbec.ServiceID == (int)ServiceEnum.Payments
+                                                    && acbec.EntryClassCode == "99"
+                                                    && qicg.QuoteInterestCalculationGroupID == dto.QuoteInterestCalculationGroupID
+                                               select acbec;
+
+            return isFintegrateTransactionQuery.Any();
+        }
+        #endregion
+    }
+}
+SHIT
